@@ -69,7 +69,7 @@
     };
     return m;
   }
-  const SHADOW = { iWall: 3, iCeil: 3, iSlab: 3, iWood: 2, iTile: 2, iStone: 2, iConc: 3, iMetal: 3, iSteel: 3, iDoor: 3, iGlass: 0, iLamp: 0, iGoods: 3, iFabric: 3, iLeaf: 3, iDeco: 2, iBottle: 0, iFrost: 0 };
+  const SHADOW = { iWall: 3, iWallX: 3, iCeil: 3, iSlab: 3, iWood: 2, iTile: 2, iStone: 2, iConc: 3, iMetal: 3, iSteel: 3, iDoor: 3, iGlass: 0, iLamp: 0, iGoods: 3, iFabric: 3, iLeaf: 3, iDeco: 2, iBottle: 0, iFrost: 0 };
   function mats() {
     if (M) return M;
     const X = H.tex;
@@ -96,7 +96,22 @@
       iBottle: new THREE.MeshStandardMaterial({ color: 0x8cc4ee, transparent: true, opacity: 0.62, roughness: 0.12, metalness: 0.0, envMapIntensity: 0.6 }),
       iFrost: new THREE.MeshStandardMaterial({ color: 0xf1f4f6, transparent: true, opacity: 0.86, roughness: 0.55, metalness: 0.0, side: THREE.DoubleSide, envMapIntensity: 0.4 }), // 卫生间磨砂玻璃
     };
+    M.iWallX = M.iWall; // 外墙内皮：画面上和 iWall 一样，单独成网格只为了换阴影深度材质（见 PUSH）
     return M;
+  }
+  // 外墙在太阳阴影图里只剩内皮那一面（外皮朝着太阳，按背面投影被剔掉），离地板太近：
+  // normalBias 和掠射角下的深度误差会在墙根吃出一条漏光带（用户看到走廊后墙根"透光"）。
+  // 画阴影图时把内皮沿法线往墙里推 PUSH，挡光面离屋里的地板远了，画面本身不变。
+  const PUSH = 0.17;
+  let pushDepthMat = null;
+  function pushDepth() {
+    if (pushDepthMat) return pushDepthMat;
+    pushDepthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+    pushDepthMat.onBeforeCompile = (sh) => {
+      sh.vertexShader = sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+        transformed -= normal * ${PUSH.toFixed(2)};`);
+    };
+    return pushDepthMat;
   }
   const matFor = (k) => mats()[k] || H.mat.list[k];
   const shadowFor = (k) => (SHADOW[k] !== undefined ? SHADOW[k] : (H.mat.shadow[k] || 0));
@@ -184,6 +199,7 @@
         if (opts.bound) g.boundingSphere = opts.bound.clone(); else g.computeBoundingSphere();
         const sh = shadowFor(k);
         mesh.castShadow = !!(sh & 1); mesh.receiveShadow = !!(sh & 2);
+        if (k === 'iWallX') mesh.customDepthMaterial = pushDepth();
         mesh.matrixAutoUpdate = false; mesh.updateMatrix();
         parent.add(mesh); out.push(mesh);
       }
@@ -264,9 +280,11 @@
         const P = [F.P(o, r.u0, r.v0, 0), F.P(o, r.u1, r.v0, 0), F.P(o, r.u1, r.v1, 0), F.P(o, r.u0, r.v1, 0)];
         S.quad(o.k, P[0], P[1], P[2], P[3], F.n, c, P.map((p) => UV(o, p)));
       }
+      // 内皮两头各多伸 PUSH 进相邻外墙里（看不见）：阴影图里往墙里推过之后，墙角两片还能接上，不漏一条缝
+      const kx = o.ki === 'iWall' ? 'iWallX' : o.ki, ext = kx === 'iWallX' ? PUSH : 0;
       for (const [z0, z1, un] of zonesOf(name)) {
         S.unit = un;
-        for (const r of rectsMinus(Math.max(a + o.t, z0), Math.min(b - o.t, z1), o.y0, o.y1, holes)) S.quad(o.ki, F.P(o, r.u0, r.v0, o.t), F.P(o, r.u1, r.v0, o.t), F.P(o, r.u1, r.v1, o.t), F.P(o, r.u0, r.v1, o.t), neg, ci);
+        for (const r of rectsMinus(Math.max(a + o.t - ext, z0), Math.min(b - o.t + ext, z1), o.y0, o.y1, holes)) S.quad(kx, F.P(o, r.u0, r.v0, o.t), F.P(o, r.u1, r.v0, o.t), F.P(o, r.u1, r.v1, o.t), F.P(o, r.u0, r.v1, o.t), neg, ci);
       }
       for (const h of holes) {
         const v0 = Math.max(h.v0, o.y0), v1 = Math.min(h.v1, o.y1);
