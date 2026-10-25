@@ -25,7 +25,9 @@
   // 天空的环境贴图漫反射同理（镜面反射保留，地板还能反光）
   // 夜里亮灯：每个顶点带 aUnit（属于哪一户，7 = 公共区，-1 = 不算），标准层每一层（实例）带一个 aLitMask，
   // 第 k 位为 1 表示这一层第 k 户开着灯 —— 开灯的户墙、地板、天花板泛暖光，从街上看就是一扇扇亮着的窗
-  const IU = { uIndoorAmb: { value: 0.45 }, uIndoorIbl: { value: 0.25 }, uBounce: { value: new THREE.Color(0.3, 0.29, 0.27) }, uNightGlow: { value: 0 }, uNight: { value: 0 } };
+  const IU = { uIndoorAmb: { value: 0.45 }, uIndoorIbl: { value: 0.25 }, uBounce: { value: new THREE.Color(0.3, 0.29, 0.27) }, uNightGlow: { value: 0 }, uNight: { value: 0 },
+    // 封面那间客厅（K403+997）的世界坐标包围盒：盒子里的墙面、布料纹理满强度，别处一半
+    uHeroMin: { value: new THREE.Vector3(1e6, 1e6, 1e6) }, uHeroMax: { value: new THREE.Vector3(-1e6, -1e6, -1e6) } };
   // 装饰灯：同一户的三款灯（aVar = 1 灯带 / 2 吸顶灯 / 3 吊灯）都建在标准层里，
   // 每层实例的 aLightSel 每户占 2 位，选中哪款就显示哪款，其余塌成一个点（不多一次绘制）
   const LIT_VERT = `
@@ -44,13 +46,35 @@
   // three 把投影的平行光排在前面；下标超出投影灯数的（闪电补光、关了阴影的日光月光）没有阴影挡，会直接穿墙照进屋，这里在屋里把它们去掉
   const DIR_LINE = 'getDirectionalLightInfo( directionalLight, geometry, directLight );';
   const DIR_CUT = DIR_LINE + '\n#if ( UNROLLED_LOOP_INDEX >= NUM_DIR_LIGHT_SHADOWS )\ndirectLight.color *= 0.0;\n#endif';
-  function indoorLit(m) {
+  // opts.hero = 纹理强度：map 是围绕 0.5 的灰度图，按强度叠到底色上；在封面那间里满强度，别处减半（HERO_TEX）
+  const HERO_VERT = `
+    #ifdef HERO_TEX
+      #ifdef USE_INSTANCING
+        vHeroP = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+      #else
+        vHeroP = (modelMatrix * vec4(transformed, 1.0)).xyz;
+      #endif
+    #endif`;
+  const HERO_MAP = `
+    #ifdef HERO_TEX
+      #ifdef USE_MAP
+        vec4 heroTexel = texture2D(map, vUv);
+        float heroK = (all(greaterThan(vHeroP, uHeroMin)) && all(lessThan(vHeroP, uHeroMax))) ? 1.0 : 0.5;
+        diffuseColor.rgb *= 1.0 + (heroTexel.rgb - 0.5) * (MAP_AMT * heroK);
+      #endif
+    #else
+      #include <map_fragment>
+    #endif`;
+  function indoorLit(m, opts = {}) {
     m.defines = { LIT_DEFAULT: '0.0' };
+    if (opts.hero) { m.defines.HERO_TEX = ''; m.defines.MAP_AMT = opts.hero.toFixed(3); }
     m.onBeforeCompile = (sh) => {
       Object.assign(sh.uniforms, IU);
-      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\n' + LIT_DECL).replace('#include <begin_vertex>', '#include <begin_vertex>' + LIT_VERT);
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\n' + LIT_DECL + '\n#ifdef HERO_TEX\nvarying vec3 vHeroP;\n#endif')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>' + LIT_VERT).replace('#include <project_vertex>', '#include <project_vertex>' + HERO_VERT);
       sh.fragmentShader = sh.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform float uIndoorAmb; uniform float uIndoorIbl; uniform vec3 uBounce; uniform float uNightGlow; varying float vLit;')
+        .replace('#include <common>', '#include <common>\nuniform float uIndoorAmb; uniform float uIndoorIbl; uniform vec3 uBounce; uniform float uNightGlow; varying float vLit;\n#ifdef HERO_TEX\nvarying vec3 vHeroP; uniform vec3 uHeroMin; uniform vec3 uHeroMax;\n#endif')
+        .replace('#include <map_fragment>', HERO_MAP)
         .replace('#include <lights_fragment_begin>', THREE.ShaderChunk.lights_fragment_begin.replace(HEMI_LINE, HEMI_LINE.replace(';', ' * uIndoorAmb;')).replace(DIR_LINE, DIR_CUT) + '\nirradiance += uBounce;')
         .replace('#include <lights_fragment_maps>', THREE.ShaderChunk.lights_fragment_maps.replace(IBL_LINE, IBL_LINE.replace(';', ' * uIndoorIbl;')))
         .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * vec3(1.0, 0.8, 0.58) * (vLit * uNightGlow);');
@@ -69,15 +93,15 @@
     };
     return m;
   }
-  const SHADOW = { iWall: 3, iWallX: 3, iCeil: 3, iSlab: 3, iWood: 2, iTile: 2, iStone: 2, iConc: 3, iMetal: 3, iSteel: 3, iDoor: 3, iGlass: 0, iLamp: 0, iGoods: 3, iFabric: 3, iLeaf: 3, iDeco: 2, iBottle: 0, iFrost: 0 };
+  const SHADOW = { iTV: 0, iTVH: 0, iWall: 3, iWallX: 3, iCeil: 3, iSlab: 3, iWood: 2, iTile: 2, iStone: 2, iConc: 3, iMetal: 3, iSteel: 3, iDoor: 3, iGlass: 0, iLamp: 0, iGoods: 3, iFabric: 3, iLeaf: 3, iDeco: 2, iBottle: 0, iFrost: 0 };
   function mats() {
     if (M) return M;
     const X = H.tex;
     const rep = (t, s) => { const c = t.clone(); c.needsUpdate = true; c.repeat.set(1 / s, 1 / s); return c; };
     // 屋里天光进不来多少：环境贴图（天空）贡献压低，不然整屋发白发蓝
-    const std = (o) => indoorLit(new THREE.MeshStandardMaterial(Object.assign({ vertexColors: true, envMapIntensity: 0.6 }, o)));
+    const std = (o, opts) => indoorLit(new THREE.MeshStandardMaterial(Object.assign({ vertexColors: true, envMapIntensity: 0.6 }, o)), opts);
     M = {
-      iWall: std({ normalMap: rep(X.plasterN, 2), normalScale: new THREE.Vector2(0.12, 0.12), roughness: 0.9 }),
+      iWall: std({ map: rep(X.wallI, 2), normalMap: rep(X.plasterN, 2), normalScale: new THREE.Vector2(0.12, 0.12), roughness: 0.9 }, { hero: 1.25 }),
       iCeil: std({ roughness: 0.95, envMapIntensity: 0.3 }),
       iSlab: std({ map: rep(X.plaster, 2), roughness: 0.9 }),
       iWood: std({ map: rep(X.floorWood, 2.4), normalMap: rep(X.floorWoodN, 2.4), normalScale: new THREE.Vector2(0.5, 0.5), roughness: 0.46, envMapIntensity: 0.6 }),
@@ -90,13 +114,16 @@
       iGlass: new THREE.MeshStandardMaterial({ color: 0xd2e6f0, transparent: true, opacity: 0.1, roughness: 0.04, metalness: 0.05, side: THREE.DoubleSide, depthWrite: false, envMapIntensity: 0.55 }),
       iLamp: lampMat(),
       iGoods: std({ roughness: 0.6 }),
-      iFabric: std({ roughness: 0.95 }),
+      iFabric: std({ map: rep(X.fabric, 0.3), roughness: 0.95 }, { hero: 1 }),
       iLeaf: std({ roughness: 0.8 }),
       iDeco: std({ roughness: 0.3, metalness: 0.7, envMapIntensity: 0.6 }),   // 灯具五金：不投影（没选中的款式塌掉了，影子也得没有）
       iBottle: new THREE.MeshStandardMaterial({ color: 0x8cc4ee, transparent: true, opacity: 0.62, roughness: 0.12, metalness: 0.0, envMapIntensity: 0.6 }),
       iFrost: new THREE.MeshStandardMaterial({ color: 0xf1f4f6, transparent: true, opacity: 0.86, roughness: 0.55, metalness: 0.0, side: THREE.DoubleSide, envMapIntensity: 0.4 }), // 卫生间磨砂玻璃
     };
     M.iWallX = M.iWall; // 外墙内皮：画面上和 iWall 一样，单独成网格只为了换阴影深度材质（见 PUSH）
+    // 电视屏幕（自发光）：封面那间全亮，别的房间半亮
+    M.iTVH = new THREE.MeshBasicMaterial({ map: X.news });
+    M.iTV = new THREE.MeshBasicMaterial({ map: X.news, color: new THREE.Color().setScalar(0.5) });
     return M;
   }
   // 外墙在太阳阴影图里只剩内皮那一面（外皮朝着太阳，按背面投影被剔掉），离地板太近：
@@ -223,6 +250,60 @@
     const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], len = Math.hypot(dx, dy, dz);
     const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(dx / len, dy / len, dz / len));
     S.geo(k, CYL(), new THREE.Matrix4().compose(new THREE.Vector3((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2), q, new THREE.Vector3(r, len, r)), c);
+  }
+
+  // 圆角盒（棱角不锋利）：r = 倒角半径；模板几何按毫米取整缓存
+  const RBC = new Map();
+  function rb(S, k, x0, y0, z0, x1, y1, z1, c, r, seg = 2) {
+    const w = x1 - x0, h = y1 - y0, d = z1 - z0;
+    if (w < 1e-3 || h < 1e-3 || d < 1e-3) return;
+    const key = [w, h, d, r].map((v) => Math.round(v * 1000)).join(',') + ',' + seg;
+    let g = RBC.get(key);
+    if (!g) { g = H.roundedBox(w, h, d, r, seg); RBC.set(key, g); }
+    // 用模板自己按面算好的 UV（米）：Sink 按每个顶点的法线重新投影的话，倒角那一圈会跳投影方向，布纹被挤成一条纯色带
+    S.geo(k, g, m4((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2), c, true);
+  }
+  // 回转体（轮廓 [半径, 高] 从下往上）
+  const LTH = new Map();
+  function lathe(key, pts, seg) {
+    let g = LTH.get(key);
+    if (!g) { g = new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), seg); LTH.set(key, g); }
+    return g;
+  }
+  const arc = (P, cx, cy, rx, ry, a0, a1, n) => { for (let i = 1; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; P.push([cx + rx * Math.cos(a), cy + ry * Math.sin(a)]); } };
+  // 饮水机上倒扣的水桶：瓶口插进机器顶，肩部圆滑过渡，桶身 5 道窄窄的凹槽（加强筋，depth = 槽深），顶上（桶底）圆角。
+  // 只在凹槽处取点（直的桶壁不用点）；hi = 封面那间的精细版，别的房间段数减半
+  function jugGeo(depth, hi) {
+    const P = [[0, 0], [0.028, 0], [0.03, 0.04]], R = 0.14, yb = 0.12, yt = 0.44, rt = 0.05, per = 0.064, hw = 0.14 * per;
+    const ns = hi ? 10 : 5, ng = hi ? 10 : 4, seg = hi ? 32 : 16;
+    for (let i = 1; i <= ns; i++) { const a = i / ns * PI / 2; P.push([0.03 + (R - 0.03) * Math.sin(a), 0.04 + (yb - 0.04) * (1 - Math.cos(a))]); }
+    for (let k = 0; k < 5; k++) {
+      const yc = yb + per * (k + 0.5);
+      for (let j = 0; j <= ng; j++) { const t = -1 + 2 * j / ng; P.push([R - depth * (0.5 + 0.5 * Math.cos(t * PI)), yc + t * hw]); }
+    }
+    P.push([R, yt]);
+    arc(P, R - rt, yt, rt, rt, 0, PI / 2, hi ? 8 : 4);
+    P.push([0, yt + rt]);
+    return lathe(`jug${depth},${seg}`, P, seg);
+  }
+  // 水杯：杯底圆角、下半截 6 圈防滑纹（depth = 纹深）、往上略微张开；杯口被盖子盖住
+  function cupGeo(depth, hi) {
+    const P = [[0, 0], [0.024, 0]], n = hi ? 72 : 30, seg = hi ? 28 : 14, rOf = (y) => 0.03 + 0.006 * (y / 0.11);
+    arc(P, 0.024, 0.006, 0.006, 0.006, -PI / 2, 0, hi ? 5 : 3);
+    const y1 = hi ? 0.11 : 0.072;
+    for (let i = 1; i <= n; i++) { const y = 0.006 + (y1 - 0.006) * i / n; P.push([rOf(y) - (y < 0.072 ? depth * 0.5 * (1 - Math.cos((y - 0.006) / 0.011 * PI * 2)) : 0), y]); }
+    if (!hi) P.push([rOf(0.11), 0.11]);
+    P.push([0.03, 0.11], [0, 0.11]);
+    return lathe(`cup${depth},${seg}`, P, seg);
+  }
+  // 杯盖：圆柱 + 圆角顶 + 一个小嘴
+  function lidGeo(hi) {
+    const P = [[0, 0], [0.039, 0], [0.039, 0.012]];
+    arc(P, 0.031, 0.012, 0.008, 0.008, 0, PI / 2, hi ? 6 : 3);
+    P.push([0.012, 0.02], [0.012, 0.027]);
+    arc(P, 0.008, 0.027, 0.004, 0.004, 0, PI / 2, hi ? 3 : 2);
+    P.push([0, 0.031]);
+    return lathe('lid' + (hi ? 28 : 14), P, hi ? 28 : 14);
   }
 
   // 矩形 [u0,u1]x[v0,v1] 扣掉若干矩形洞，切成不重叠的小矩形
@@ -452,6 +533,13 @@
   // ======================================================================
   // 公寓
   // ======================================================================
+  // 封面那间客厅：出生点后面 3m（世界 z = +3，里程 K403+997）、路左侧那栋公寓一楼，客厅占着这个位置的那一户
+  const HERO_Z = 3;
+  function heroLz(r) {
+    if (r.type !== 'apt' || !r.ch || r.ch.idx !== 0 || r.ox > 0) return null;
+    const lz = (HERO_Z - r.oz) * (Math.cos(r.ry) >= 0 ? 1 : -1); // ry 只有 0 / π：世界 z = oz ± 局部 z
+    return Math.abs(lz) < r.W / 2 - 0.3 ? lz : null;
+  }
   function layoutApt(r) {
     const D = r.D, W = r.W, F = r.F;
     const L = { r, D, W, F };
@@ -512,6 +600,9 @@
     mkWing(lw, 1); mkWing(rw, -1);
     L.units.sort((p, q) => p.z0 - q.z0);
     L.units.forEach((u, i) => { u.no = i + 1; u.wallC = UNITC[(r.seed + i) % UNITC.length]; unitPlan(L, u, zin0(u.z0), zin1(u.z1)); });
+    // 封面那间（只算一楼）：这次的细化在它里面满效果，别的房间减半
+    const hz = heroLz(r);
+    L.hero = hz === null ? null : L.units.find((u) => hz > u.living.z0 && hz < u.living.z1) || null;
     const zs = new Set();
     for (const z of [...L.units.flatMap((u) => [u.z0, u.z1]), pas.z0, pas.z1, stz.z0, stz.z1]) if (z > L.z0 + 0.01 && z < L.z1 - 0.01) zs.add(+z.toFixed(4));
     L.bounds = [...zs].sort((p, q) => p - q);
@@ -637,8 +728,10 @@
     const w = r.wins.find((w) => w.kind === 'bdoor' && w.face === 'front' && w.z > z0 && w.z < z1);
     return w ? [w.z, w.z + w.w / 2 - 0.065] : null;
   }
-  function livingRoom(S, L, u, ceil, out) {
-    const rm = u.living, rng = H.rng(L.r.seed * 131 + u.no * 17);
+  // hero = 封面那间：倒角、筋纹、屏幕亮度满效果，按钮做成圆的；别的房间这些效果减半、按钮保持方块
+  function livingRoom(S, L, u, ceil, out, hero = false) {
+    const rm = u.living, rng = H.rng(L.r.seed * 131 + u.no * 17), q = hero ? 1 : 0.5;
+    const rbL = (...a) => rb(...a, hero ? 2 : 1); // 别的房间倒角只分 1 段（每层楼都实例化一份，省面数）
     const zi0 = rm.z0 + 0.07, zi1 = rm.z1 - 0.07, xi0 = T + 0.02, xi1 = rm.x1 - 0.06;
     const W = zi1 - zi0;
     // 沙发靠远离核心筒那面侧墙，电视柜靠对面；都放在靠窗的前半间（后面有门洞）
@@ -646,17 +739,20 @@
     const zr = (base, dir, a, b) => [Math.min(base + dir * a, base + dir * b), Math.max(base + dir * a, base + dir * b)];
     const len = H.clamp(xi1 - xi0 - 1.9, 1.3, 2.1), xs0 = xi0 + 0.6, xs1 = xs0 + len, xm = (xs0 + xs1) / 2;
     const fab = col(rng.pick(SOFA)), fab2 = fab.clone().offsetHSL(0, -0.04, 0.07), wood = col(rng.pick(WOODS)), dark = col('#2a2d31');
-    // 沙发：底座、靠背、扶手、坐垫、靠垫、小腿
+    // 沙发：底座、靠背、扶手、坐垫、靠垫、小腿；布料纹理在材质里，块块都倒圆角（软垫圆一些）
+    const rs = 0.05 * q, rp = 0.07 * q;
     let [a0, a1] = zr(zw, sd, 0.02, 0.86);
-    S.box('iFabric', xs0, 0.07, a0, xs1, 0.4, a1, fab);
-    for (const [lx, lz] of [[xs0 + 0.06, a0 + 0.06], [xs1 - 0.1, a0 + 0.06], [xs0 + 0.06, a1 - 0.1], [xs1 - 0.1, a1 - 0.1]]) S.box('iDoor', lx, 0, lz, lx + 0.04, 0.07, lz + 0.04, dark);
+    rbL(S, 'iFabric', xs0, 0.07, a0, xs1, 0.4, a1, fab, rs);
+    for (const [lx, lz] of [[xs0 + 0.06, a0 + 0.06], [xs1 - 0.1, a0 + 0.06], [xs0 + 0.06, a1 - 0.1], [xs1 - 0.1, a1 - 0.1]]) S.box('iDoor', lx, 0, lz, lx + 0.04, 0.08, lz + 0.04, dark);
     const [b0, b1] = zr(zw, sd, 0.02, 0.24);
-    S.box('iFabric', xs0, 0.4, b0, xs1, 0.86, b1, fab);
-    S.box('iFabric', xs0, 0.4, a0, xs0 + 0.17, 0.62, a1, fab); S.box('iFabric', xs1 - 0.17, 0.4, a0, xs1, 0.62, a1, fab);
-    const [c0, c1] = zr(zw, sd, 0.24, 0.84), [d0, d1] = zr(zw, sd, 0.22, 0.38), hm = (xs0 + xs1) / 2;
-    S.box('iFabric', xs0 + 0.19, 0.4, c0, hm - 0.01, 0.5, c1, fab2); S.box('iFabric', hm + 0.01, 0.4, c0, xs1 - 0.19, 0.5, c1, fab2);
-    S.box('iFabric', xs0 + 0.2, 0.5, d0, hm - 0.02, 0.8, d1, fab2); S.box('iFabric', hm + 0.02, 0.5, d0, xs1 - 0.2, 0.8, d1, fab2);
-    out.push({ x0: xs0, x1: xs1, z0: a0, z1: a1, y0: 0, y1: 0.9 });
+    rbL(S, 'iFabric', xs0, 0.36, b0, xs1, 0.86, b1, fab, rp);
+    rbL(S, 'iFabric', xs0, 0.36, a0, xs0 + 0.17, 0.64, a1, fab, rs); rbL(S, 'iFabric', xs1 - 0.17, 0.36, a0, xs1, 0.64, a1, fab, rs);
+    const [c0, c1] = zr(zw, sd, 0.24, 0.84), [d0, d1] = zr(zw, sd, 0.2, 0.38), hm = (xs0 + xs1) / 2;
+    rbL(S, 'iFabric', xs0 + 0.18, 0.37, c0, hm - 0.005, 0.52, c1, fab2, rs); rbL(S, 'iFabric', hm + 0.005, 0.37, c0, xs1 - 0.18, 0.52, c1, fab2, rs);
+    rbL(S, 'iFabric', xs0 + 0.19, 0.5, d0, hm - 0.01, 0.82, d1, fab2, rp); rbL(S, 'iFabric', hm + 0.01, 0.5, d0, xs1 - 0.19, 0.82, d1, fab2, rp);
+    // 坐面那一片能跳上去站（0.52），靠背那一条照样挡人；两块之间隔 1.2cm（layoutcheck 查重叠用整条记录）
+    const [p0, p1] = zr(zw, sd, 0.02, 0.24), [q0, q1] = zr(zw, sd, 0.252, 0.86);
+    out.push({ x0: xs0, x1: xs1, z0: a0, z1: a1, y0: 0, y1: 0.9, parts: [{ x0: xs0, x1: xs1, z0: p0, z1: p1 }, { x0: xs0, x1: xs1, z0: q0, z1: q1, top: 0.52 }] });
     // 电视柜 + 电视（挂在柜子上方的墙前）
     const tl = Math.min(1.7, len), tx0 = xm - tl / 2, tx1 = xm + tl / 2;
     const [e0, e1] = zr(zt, -sd, 0.02, 0.44);
@@ -664,16 +760,20 @@
     for (const lx of [tx0 + 0.05, tx1 - 0.09]) S.box('iMetal', lx, 0, e0 + 0.05, lx + 0.04, 0.08, e1 - 0.05, dark);
     const front = sd < 0 ? e1 : e0, fdir = sd < 0 ? 1 : -1;  // 柜子朝沙发那一面
     for (const k of [1, 2]) S.box('iDoor', tx0 + (tx1 - tx0) * k / 3 - 0.006, 0.12, Math.min(front, front + fdir * 0.006), tx0 + (tx1 - tx0) * k / 3 + 0.006, 0.46, Math.max(front, front + fdir * 0.006), dark);
+    // 电视：圆角机身 + 屏幕放着"四零三新闻"（UV 让字从沙发那边看是正的）
     const [g0, g1] = zr(zt, -sd, 0.04, 0.09);
-    S.box('iMetal', xm - 0.62, 0.66, g0, xm + 0.62, 1.37, g1, col('#16191d'));
+    rbL(S, 'iMetal', xm - 0.62, 0.66, g0, xm + 0.62, 1.37, g1, col('#16191d'), 0.018 * q);
     const scr = sd < 0 ? g1 + 0.002 : g0 - 0.002;
-    S.quad('iSteel', [xm - 0.58, 0.7, scr], [xm + 0.58, 0.7, scr], [xm + 0.58, 1.33, scr], [xm - 0.58, 1.33, scr], [0, 0, fdir], col('#0b0d10'));
-    S.box('iMetal', xm - 0.08, 0.5, Math.min(g0, g1) - 0.02, xm + 0.08, 0.66, Math.max(g0, g1) + 0.02, dark);
+    const tuv = fdir > 0 ? [[0, 0], [1, 0], [1, 1], [0, 1]] : [[1, 0], [0, 0], [0, 1], [1, 1]];
+    S.quad(hero ? 'iTVH' : 'iTV', [xm - 0.58, 0.7, scr], [xm + 0.58, 0.7, scr], [xm + 0.58, 1.33, scr], [xm - 0.58, 1.33, scr], [0, 0, fdir], WHITE, tuv);
+    rbL(S, 'iMetal', xm - 0.08, 0.5, Math.min(g0, g1) - 0.02, xm + 0.08, 0.68, Math.max(g0, g1) + 0.02, dark, 0.012 * q);
     out.push({ x0: tx0, x1: tx1, z0: e0, z1: e1, y0: 0, y1: 1.4 });
     // 茶几：在沙发和电视柜中间，贴着一边放（离家具 0.3m），另一边留至少 0.75m 的走道——
     // 窗前那条带被沙发挡着，从屋里去窗边、去阳台只能走这条道，所以走道放在阳台门能推开那半扇那边
     // t = 从沙发那面墙往电视那面墙量；A：茶几贴沙发，走道在电视那边；B：茶几贴电视，走道在沙发那边。
     // 走道和阳台门那半扇要重叠出一个人身宽（need）；茶几宽 0.35–0.6，取两种摆法里能放下的最宽的
+    // 水杯：一圈圈防滑纹的杯身 + 红色杯盖
+    const cup = (x, y, z) => { S.geo('iBottle', cupGeo(0.0024 * q, hero), m4(x, y, z), WHITE); S.geo('iGoods', lidGeo(hero), m4(x, y + 0.108, z), col('#d8322a')); };
     const gap = W - 0.86 - 0.44;
     const dr = balDoor(L.r, rm.z0, rm.z1), dt = dr && [(dr[0] - zw) * sd, (dr[1] - zw) * sd].sort((p, q) => p - q);
     const need = Math.min(0.68, dt ? dt[1] - dt[0] : 1);
@@ -689,9 +789,9 @@
       S.box('iDoor', xm - 0.55, 0.38, zc - tw / 2, xm + 0.55, 0.42, zc + tw / 2, wood);
       S.box('iDoor', xm - 0.5, 0.12, zc - tw / 2 + 0.04, xm + 0.5, 0.14, zc + tw / 2 - 0.04, wood);
       for (const [lx, lz] of [[-0.5, -tw / 2 + 0.04], [0.46, -tw / 2 + 0.04], [-0.5, tw / 2 - 0.08], [0.46, tw / 2 - 0.08]]) S.box('iDoor', xm + lx, 0, zc + lz, xm + lx + 0.04, 0.38, zc + lz + 0.04, wood);
-      S.geo('iBottle', CYL(), m4(xm + 0.25, 0.5, zc, 0, 0.04, 0.16, 0.04), WHITE);           // 茶几上一个小水瓶
+      cup(xm + 0.25, 0.42, zc);                                                               // 茶几上一个带红盖的水杯
       S.box('iGoods', xm - 0.3, 0.42, zc - 0.12, xm - 0.05, 0.45, zc + 0.08, col(rng.pick(['#e85d4a', '#3b6fb6', '#f2a33a'])));
-      out.push({ x0: xm - 0.55, x1: xm + 0.55, z0: zc - tw / 2, z1: zc + tw / 2, y0: 0, y1: 0.45 });
+      out.push({ x0: xm - 0.55, x1: xm + 0.55, z0: zc - tw / 2, z1: zc + tw / 2, y0: 0, y1: 0.45, top: 0.42 });
     } else {
       // 客厅太窄放不下茶几：沙发靠里那头的墙角放一张小边几
       const [k0, k1] = zr(zw, sd, 0.06, 0.5), kx0 = xs1 + 0.06, kx1 = kx0 + 0.44;
@@ -699,18 +799,36 @@
         S.box('iDoor', kx0, 0.5, k0, kx1, 0.54, k1, wood);
         S.geo('iDoor', CYL(), m4((kx0 + kx1) / 2, 0.25, (k0 + k1) / 2, 0, 0.03, 0.5, 0.03), wood);
         S.geo('iDoor', CYL(), m4((kx0 + kx1) / 2, 0.01, (k0 + k1) / 2, 0, 0.16, 0.02, 0.16), wood);
-        S.geo('iBottle', CYL(), m4((kx0 + kx1) / 2 + 0.08, 0.62, (k0 + k1) / 2, 0, 0.04, 0.16, 0.04), WHITE);
-        out.push({ x0: kx0, x1: kx1, z0: k0, z1: k1, y0: 0, y1: 0.55 });
+        cup((kx0 + kx1) / 2 + 0.08, 0.54, (k0 + k1) / 2);
+        out.push({ x0: kx0, x1: kx1, z0: k0, z1: k1, y0: 0, y1: 0.55, top: 0.54 });
       }
     }
-    // 饮水机：靠电视那面墙、窗边的角落，上面倒扣一桶水
+    // 饮水机：靠电视那面墙、窗边的角落。下柜 + 上机身（控制面板、两个按钮），按钮下面挖一个放水杯的凹槽（接水盘、两个出水嘴）；
+    // 机身倒圆角，上面倒扣一桶带加强筋的水
     const [h0, h1] = zr(zt, -sd, 0.04, 0.38), wx0 = xi0 + 0.06, wx1 = wx0 + 0.34, wz = (h0 + h1) / 2;
-    S.box('iGoods', wx0, 0, h0, wx1, 0.96, h1, col('#f2f3f1'));
-    S.box('iGoods', wx1, 0.55, wz - 0.09, wx1 + 0.01, 0.74, wz + 0.09, col('#c9ced3'));
-    S.box('iGoods', wx1 - 0.02, 0.62, wz - 0.07, wx1 + 0.04, 0.66, wz - 0.03, col('#d23b2e'));
-    S.box('iGoods', wx1 - 0.02, 0.62, wz + 0.03, wx1 + 0.04, 0.66, wz + 0.07, col('#2f6fb5'));
-    S.geo('iBottle', CYL(), m4((wx0 + wx1) / 2, 1.2, wz, 0, 0.14, 0.46, 0.14), WHITE);
-    S.geo('iBottle', CYL(), m4((wx0 + wx1) / 2, 0.98, wz, 0, 0.05, 0.05, 0.05), WHITE);
+    const bodyC = col('#f2f3f1'), rw = 0.03 * q, chrome = col('#d7dadd');
+    rbL(S, 'iGoods', wx0, 0, h0, wx1, 0.38, h1, bodyC, rw);                                  // 下柜
+    rbL(S, 'iGoods', wx0, 0.6, h0, wx1, 0.96, h1, bodyC, rw);                                // 上机身
+    rbL(S, 'iGoods', wx0, 0.34, h0, wx1 - 0.13, 0.64, h1, bodyC, rw * 0.5);                  // 凹槽后壁
+    rbL(S, 'iGoods', wx1 - 0.16, 0.34, h0, wx1, 0.64, h0 + 0.045, bodyC, rw * 0.5);          // 凹槽两侧
+    rbL(S, 'iGoods', wx1 - 0.16, 0.34, h1 - 0.045, wx1, 0.64, h1, bodyC, rw * 0.5);
+    S.box('iGoods', wx1 - 0.132, 0.38, h0 + 0.045, wx1 - 0.128, 0.6, h1 - 0.045, col('#c6cbd0')); // 凹槽里衬（深一点，看得出是个槽）
+    rbL(S, 'iMetal', wx1 - 0.125, 0.38, h0 + 0.05, wx1 - 0.008, 0.396, h1 - 0.05, col('#9aa1a8'), 0.004); // 接水盘
+    for (let k = -2; k <= 2; k++) S.box('iMetal', wx1 - 0.115, 0.396, wz + k * 0.04 - 0.004, wx1 - 0.018, 0.398, wz + k * 0.04 + 0.004, col('#5d646b'));
+    for (const dzz of [-0.05, 0.05]) S.geo('iMetal', CYL(), m4(wx1 - 0.07, 0.58, wz + dzz, 0, 0.009, 0.04, 0.009), chrome); // 出水嘴
+    rbL(S, 'iGoods', wx1 - 0.004, 0.61, wz - 0.1, wx1 + 0.008, 0.8, wz + 0.1, col('#c9ced3'), 0.005 * q); // 控制面板
+    if (hero) {
+      // 圆按钮：扁圆的钮头 + 一圈浅色底座
+      for (const [dzz, c] of [[-0.05, '#d23b2e'], [0.05, '#2f6fb5']]) {
+        S.geo('iMetal', CYL(), m4(wx1 + 0.009, 0.64, wz + dzz, 0, 0.026, 0.006, 0.026, 0, PI / 2), chrome);
+        S.geo('iGoods', SPH(), m4(wx1 + 0.012, 0.64, wz + dzz, 0, 0.012, 0.02, 0.02), col(c));
+      }
+    } else {
+      S.box('iGoods', wx1 - 0.02, 0.62, wz - 0.07, wx1 + 0.04, 0.66, wz - 0.03, col('#d23b2e'));
+      S.box('iGoods', wx1 - 0.02, 0.62, wz + 0.03, wx1 + 0.04, 0.66, wz + 0.07, col('#2f6fb5'));
+    }
+    rbL(S, 'iGoods', wx0 + 0.07, 0.95, h0 + 0.07, wx1 - 0.07, 0.985, h1 - 0.07, bodyC, 0.012);  // 水桶座
+    S.geo('iBottle', jugGeo(0.007 * q, hero), m4((wx0 + wx1) / 2, 0.95, wz), WHITE);
     out.push({ x0: wx0, x1: wx1 + 0.04, z0: h0, z1: h1, y0: 0, y1: 1.45 });
     // 三款装饰灯
     const cx = (rm.x0 + rm.x1) / 2, cz = (rm.z0 + rm.z1) / 2, gold = col(rng.pick(['#d8b25a', '#c9ced3', '#2a2d31'])), warm = col('#fff1d6');
@@ -763,7 +881,8 @@
     F.box(S, 'iFabric', ba0 - 0.01, ba1 + 0.01, 0.56, 0.6, 0.78, 1.02, duv.clone().offsetHSL(0, 0, 0.08)); // 被子翻折
     const np = bw >= 1.2 ? 2 : 1, pw = (bw - 0.12) / np;
     for (let i = 0; i < np; i++) F.box(S, 'iFabric', ba0 + 0.06 + i * pw + 0.02, ba0 + 0.06 + (i + 1) * pw - 0.02, 0.52, 0.64, 0.14, 0.5, white);
-    out.push(Object.assign(F.R(ba0 - 0.03, ba1 + 0.03, 0, len + 0.01), { y0: 0, y1: 0.7 }));
+    // 床面能跳上去站（被子顶 0.56），床头板那一条照样挡人
+    out.push(Object.assign(F.R(ba0 - 0.03, ba1 + 0.03, 0, len + 0.01), { y0: 0, y1: 0.7, parts: [F.R(ba0 - 0.03, ba1 + 0.03, 0, 0.08), Object.assign(F.R(ba0 - 0.03, ba1 + 0.03, 0.092, len + 0.01), { top: 0.56 })] }));
     // 床头柜 + 台灯
     F.box(S, 'iDoor', sa0, sa0 + 0.44, 0.04, 0.52, 0.03, 0.43, wood);
     F.box(S, 'iDoor', sa0 + 0.04, sa0 + 0.4, 0.29, 0.305, 0.43, 0.436, col('#2a2d31'));
@@ -865,7 +984,7 @@
       S.unit = u.no - 1;
       floorQuad(S, rm.k, rm.c || '#ffffff', rm.x0, rm.x1, rm.z0, rm.z1, 0);
       if (rm === u.living) {
-        u.furn = []; livingRoom(S, L, u, ceil, u.furn);
+        u.furn = []; livingRoom(S, L, u, ceil, u.furn, ground && L.hero === u);
         const frng = H.rng(L.r.seed * 59 + u.no * 7);
         bedrooms(S, u.furn, frng, u); bathroom(S, u.furn, frng, u);
         lamps.push([(rm.x0 + rm.x1) / 2, (rm.z0 + rm.z1) / 2, 0, u.no - 1, true, rm]);
@@ -962,7 +1081,12 @@
     return [fr, S.toGeo('k')];
   }
   // 居中的盒子几何，带顶点色（室内材质都读顶点色，没有就是黑的）
-  function colorBox(w, h, d, c) { const S = new Sink(); S.box('k', -w / 2, -h / 2, -d / 2, w / 2, h / 2, d / 2, col(c)); return S.toGeo('k'); }
+  function colorBox(w, h, d, c) { const S = new Sink(); S.unit = 7; S.box('k', -w / 2, -h / 2, -d / 2, w / 2, h / 2, d / 2, col(c)); return S.toGeo('k'); }
+  // 单独建的实例化网格补上"这一层哪几户开灯"的属性：一律当公共区（第 7 位），夜里和走廊一样亮
+  function litAttrs(g, n) {
+    g.setAttribute('aLitMask', new THREE.InstancedBufferAttribute(new Float32Array(n).fill(255), 1));
+    g.setAttribute('aLightSel', new THREE.InstancedBufferAttribute(new Float32Array(n), 1));
+  }
   const wrapA = (a) => Math.atan2(Math.sin(a), Math.cos(a));
   // 铰链门：closed = 关着时门扇朝向（从铰链指向门扇另一头），opens = 开到底时朝向
   function hingeDoor(o) {
@@ -1205,7 +1329,7 @@
     const el = st.el = { F, y: L.Y(0), floor: 0, dir: 0, v: 0, target: -1, queue: new Set(), doors: 0, phase: 'idle', timer: 0, hover: null };
     elevTextures(el); drawPanel(el); drawInd(el);
     const cab = L.cab, cabG = new THREE.Group();
-    S = new Sink();
+    S = new Sink(); S.unit = 7; // 轿厢算公共区：夜里一直亮着
     const steel = col('#c3c8cd'), dark = col('#7b8288');
     S.box('iStone', cab.x0 - 0.04, -0.12, cab.z0 - 0.04, cab.x1 + 0.04, 0, cab.z1 + 0.04, col('#cfc8bc'));
     S.box('iSteel', cab.x0 - 0.04, cab.h, cab.z0 - 0.04, cab.x1 + 0.04, cab.h + 0.06, cab.z1 + 0.04, steel);
@@ -1218,7 +1342,7 @@
     S.box('iSteel', cab.x1, 0, dz1, cab.x1 + 0.04, cab.h, cab.z1, steel);
     S.box('iSteel', cab.x1, 2.1, dz0, cab.x1 + 0.04, cab.h, dz1, steel);
     tube(S, 'iSteel', [cab.x0 + 0.06, 0.92, cab.z0 + 0.15], [cab.x0 + 0.06, 0.92, cab.z1 - 0.15], 0.02, dark);
-    S.build(cabG);
+    S.build(cabG, { inst: [new THREE.Matrix4()], mask: [255] });
     // 按钮面板（侧墙靠门那头）、门上方的楼层显示
     const pw = 0.26, ph = 0.52;
     el.panel = { x: cab.x1 - 0.32, y: 1.25, z: cab.z1 - 0.006, w: pw, h: ph };
@@ -1228,12 +1352,14 @@
     imesh.position.set(cab.x1 - 0.006, 2.27, L.sh.zc); imesh.rotation.y = -PI / 2; cabG.add(imesh);
     // 轿厢门两扇
     const lgeo = colorBox(0.03, 2.1, 0.47, '#c9ced3');
-    el.cabDoors = [-1, 1].map((sd) => { const m = new THREE.Mesh(lgeo, mats().iSteel); m.castShadow = true; m.userData.sd = sd; cabG.add(m); return m; });
+    litAttrs(lgeo, 1);
+    el.cabDoors = [-1, 1].map((sd) => { const m = new THREE.InstancedMesh(lgeo, mats().iSteel, 1); m.setMatrixAt(0, new THREE.Matrix4()); m.castShadow = true; m.userData.sd = sd; cabG.add(m); return m; });
     cabG.position.y = el.y;
     cabG.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
     grp.add(cabG); el.cab = cabG;
     // 厅门（每层两扇）
     const hgeo = colorBox(0.04, 2.15, 0.52, '#c9ced3');
+    litAttrs(hgeo, F * 2);
     const hall = el.hall = new THREE.InstancedMesh(hgeo, mats().iSteel, F * 2);
     hall.geometry.boundingSphere = bound.clone(); hall.castShadow = true; hall.receiveShadow = true; hall.frustumCulled = true;
     grp.add(hall);
@@ -1268,8 +1394,13 @@
     wallColliders(boxes, wG, L.Y(0));
     for (let f = 1; f < F; f++) wallColliders(boxes, wU, L.Y(f));
     wallColliders(boxes, wT, L.Y(F - 1));
-    // 家具碰撞至少 0.95 高：跳跃顶点约 0.77m，翻不过去（翻过去落进盒子里会被推到最近的边，可能推穿墙）
-    for (let f = 0; f < F; f++) for (const u of L.units) for (const b of u.furn || []) boxes.push({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1, y0: L.Y(f) + b.y0, y1: L.Y(f) + Math.max(b.y1, 0.95) });
+    // 家具：能站的部分（床面、沙发坐面、茶几、边几）登记成"能站的顶"（脚低于 顶-STEP 时挡，高过去就踩上）；
+    // 其余至少 1.3 高——从阳台、店门冲进来或站在床上再跳，脚最高到 1.2 左右，翻不进去（翻进去落在盒子里会被推到最近的边，可能推穿墙）
+    for (let f = 0; f < F; f++) for (const u of L.units) for (const b of u.furn || []) for (const p of b.parts || [b]) {
+      const y = L.Y(f);
+      if (p.top !== undefined) boxes.push({ x0: p.x0, x1: p.x1, z0: p.z0, z1: p.z1, y0: y + (b.y0 || 0), y1: y + p.top, top: y + p.top });
+      else boxes.push({ x0: p.x0, x1: p.x1, z0: p.z0, z1: p.z1, y0: y + (b.y0 || 0), y1: y + Math.max(b.y1, 1.3) });
+    }
     const st2 = L.st;
     for (let f = 0; f < F - 1; f++) boxes.push({ x0: st2.xa, x1: st2.xb, z0: st2.zm - 0.06, z1: st2.zm + 0.06, y0: L.Y(f), y1: L.Y(f) + L.rise(f) - 0.01 });
     // 外墙：一楼正面在大门处断开；楼上正面在阳台推拉门能开的那半边断开
@@ -1300,11 +1431,40 @@
         boxes.push({ x0: -1.3, x1: 0, z0: bz + bw2 / 2 - 0.12, z1: bz + bw2 / 2 + 0.05, y0: y, y1: y + 1.6 });
       }
     });
+    st.tops = boxes.filter((b) => b.top !== undefined);
+    // 头顶限位：各道门的门楣、阳台推拉门和一楼大门的门洞上沿（跳着穿门时头顶不能钻进去）；楼板和阳台板在 ceilApt 里算
+    st.heads = [];
+    const addHeads = (walls, yOff) => {
+      for (const w of walls) for (const o of wallSegs(w).ops) if (o.top < w.y1) {
+        const b = wallBox(w.axis, w.at, w.th, Math.max(o.a, w.from), Math.min(o.b, w.to), 0, 1);
+        st.heads.push({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1, y: yOff + o.top });
+      }
+    };
+    addHeads(wG, L.Y(0)); for (let f = 1; f < F; f++) addHeads(wU, L.Y(f)); addHeads(wT, L.Y(F - 1));
+    for (let f = 1; f < F; f++) for (const h of hU.front) if (h.w.kind === 'bdoor') st.heads.push({ x0: -0.12, x1: T + 0.05, z0: h.u0, z1: h.u1, y: L.Y(f) + h.v1 });
+    if (gd) st.heads.push({ x0: -0.12, x1: T + 0.05, z0: gd.u0, z1: gd.u1, y: gd.v1 });
+    st.ceil = ceilApt;
     st.lamps = { g: lampsG, u: lampsU };
+    // 封面那间客厅的范围（局部坐标，一楼）：IN.update 每帧换算成世界坐标交给着色器
+    if (L.hero) { const rm = L.hero.living; st.heroRect = { x0: rm.x0 - 0.03, x1: rm.x1 + 0.03, z0: rm.z0 - 0.03, z1: rm.z1 + 0.03, y0: -0.3, y1: L.Y(1) - 0.05 }; }
     st.surf = surfApt;
     st.ready = true;
   }
 
+  // 公寓里某点头顶的楼板底（扣掉客厅灯带的 0.16）/ 阳台上一层阳台板底；楼梯井、电梯井里不限（轿厢另有限位）
+  function ceilApt(st, lx, lz, ly, r) {
+    const L = st.L, s = L.st, sh = L.sh;
+    let best = Infinity;
+    if (lx < 0.02 && lx > -1.45) {
+      for (const b of st.balc || []) if (lz > b.z0 - r && lz < b.z1 + r) for (let f = 1; f < L.F; f++) if (Math.abs(ly - L.Y(f)) < 1.5) best = Math.min(best, L.Y(f + 1) - 0.14);
+    }
+    if (lx > -0.08 && lx < L.D && lz > -L.W / 2 && lz < L.W / 2) {
+      const inStair = lx > s.xa - r && lx < s.xm1 + r && lz > s.iz0 - r && lz < s.iz1 + r;
+      const inShaft = lx > sh.x0 - r && lx < sh.x1 + r && lz > sh.z0 - r && lz < sh.z1 + r;
+      if (!inStair && !inShaft) { let f = 0; for (let k = 0; k < L.F; k++) if (L.Y(k) <= ly + 0.05) f = k; best = Math.min(best, L.Y(f + 1) - 0.26 - 0.16); }
+    }
+    return best;
+  }
   // 公寓里某点能站的最高面（不高于 yNow+0.5）
   function surfApt(st, x, z, yNow) {
     const L = st.L, s = L.st, sh = L.sh, el = st.el;
@@ -1574,7 +1734,7 @@
         boxes.push({ x0: x - 0.32, x1: x + 0.32, z0: zL + 0.65, z1: zL + 1.3, y0: 0, y1: 1.2 });
       }
       S.box('iFabric', xF + 0.4, 0, zSafe - 0.5, xF + 2.2, 0.45, zSafe - 0.05, col('#4a5a6a'));
-      boxes.push({ x0: xF + 0.4, x1: xF + 2.2, z0: zSafe - 0.5, z1: zSafe - 0.05, y0: 0, y1: 0.5 });
+      boxes.push({ x0: xF + 0.4, x1: xF + 2.2, z0: zSafe - 0.5, z1: zSafe - 0.05, y0: 0, y1: 0.45, top: 0.45 }); // 等候长凳：能跳上去站
       counter(S, boxes, xB - 1.0, xB - 0.4, mid - 0.6, mid + 0.6, '#f4f1ea');
     } else if (cat === 'flower' || cat === 'fruit') {
       const pal = cat === 'flower' ? ['#ff6f91', '#ffd166', '#ef476f', '#c77dff', '#ff9f1c', '#ffffff', '#5fa8ff'] : ['#e8462e', '#f5a524', '#ffd23f', '#7bc043', '#9b3d8f', '#ff8c42'];
@@ -1602,7 +1762,7 @@
     } else if (cat === 'studio') {
       S.quad('iFabric', [xB - 0.1, 0, zL + 0.5], [xB - 0.1, 0, zR - 1.2], [xB - 0.1, 2.9, zR - 1.2], [xB - 0.1, 2.9, zL + 0.5], [-1, 0, 0], col('#dfe6ee'));
       S.box('iDoor', xB - 1.6, 0, mid - 0.25, xB - 1.1, 0.45, mid + 0.25, col('#c98b5a'));   // 拍照凳
-      boxes.push({ x0: xB - 1.6, x1: xB - 1.1, z0: mid - 0.25, z1: mid + 0.25, y0: 0, y1: 0.5 });
+      boxes.push({ x0: xB - 1.6, x1: xB - 1.1, z0: mid - 0.25, z1: mid + 0.25, y0: 0, y1: 0.45, top: 0.45 }); // 能跳上去站
       for (const zz of [mid - 1.2, mid + 1.0]) {
         tube(S, 'iMetal', [xF + 2.0, 0, zz], [xF + 2.0, 1.8, zz], 0.02, col('#2b2f33'));
         S.box('iFabric', xF + 1.75, 1.7, zz - 0.3, xF + 2.25, 2.2, zz + 0.3, col('#f8f8f8'));
@@ -1668,8 +1828,14 @@
     emitWalls(S, walls);
     S.unit = 0;
     wallColliders(boxes, walls, 0);
-    // 矮陈设的碰撞至少 0.95 高：跳不上去（翻过去落进盒子里会被推到最近的边）
-    for (const b of boxes) b.y1 = Math.max(b.y1, 0.95);
+    // 不能站的矮陈设碰撞至少 1.3 高：跳不进去（从人行道冲进店门、站在长凳上再跳，脚最高到 1.2 左右）
+    for (const b of boxes) if (b.top === undefined) b.y1 = Math.max(b.y1, 1.3);
+    st.tops = boxes.filter((b) => b.top !== undefined);
+    // 头顶限位：后屋门的门楣、店门门框上沿；店里吊顶在 ceilShop
+    st.heads = [];
+    for (const w of walls) for (const o of wallSegs(w).ops) if (o.top < w.y1) { const b = wallBox(w.axis, w.at, w.th, Math.max(o.a, w.from), Math.min(o.b, w.to), 0, 1); st.heads.push({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1, y: o.top }); }
+    r.units.forEach((u) => { const dz = u.z + u.dz; st.heads.push({ x0: -0.12, x1: T + 0.05, z0: dz - 0.6, z1: dz + 0.6, y: 2.58 }); });
+    st.ceil = (s2, lx, lz) => (lx > -0.05 && lx < D && lz > -W / 2 && lz < W / 2 ? CEIL - 0.02 : Infinity);
     // 外墙其余三面 + 分户处正面的墙垛
     boxes.push({ x0: D - T, x1: D + 0.05, z0: -W / 2, z1: W / 2, y0: 0, y1: r.Hb });
     boxes.push({ x0: -0.05, x1: D + 0.05, z0: -W / 2 - 0.05, z1: -W / 2 + T, y0: 0, y1: r.Hb });
@@ -1706,6 +1872,24 @@
     return { L, walls, boxes };
   };
 
+  // 封面：K403+997 那间公寓客厅。开局前把这栋楼同步生成好，返回镜头脚底位置（渲染坐标）、朝向和里程
+  IN.cover = function () {
+    const ch = H.world.chunks.get(0);
+    const rec = ch && ch.blds.find((r) => heroLz(r) !== null);
+    if (!rec) return null;
+    const st = open.get(rec.id) || openBuilding(rec);
+    while (!st.ready) st.gen.next();
+    if (!st.shown) show(st);
+    const L = st.L, u = L.hero;
+    if (!u) return null;
+    // 站在沙发那面墙边、客厅靠里，斜着朝窗户和电视墙的墙角看：左边一片空墙放标题，中间是窗外的街和饮水机，右边电视在放新闻
+    const rm = u.living, zi0 = rm.z0 + 0.07, zi1 = rm.z1 - 0.07, zt = u.livOuter < 0 ? zi1 : zi0, td = zt === zi0 ? 1 : -1;
+    const lx = rm.x0 + 2.7, lz = (td > 0 ? zi1 : zi0) - td * 0.39, dx = -1, dz = -0.5 * td;
+    const wx = st.c * dx + st.s * dz, wz = -st.s * dx + st.c * dz;
+    const pos = new THREE.Vector3(st.ox + st.c * lx + st.s * lz, SY() + L.Y(0), st.oz - st.s * lx + st.c * lz + st.ch.group.position.z);
+    // 里程按这间房的位置算（K403+997），不按镜头站的地方
+    return { pos, yaw: Math.atan2(-wx, -wz), pitch: 0.02, km: H.world.km(HERO_Z - H.world.originZ), id: rec.id };
+  };
   // 调试用：把商铺整个生成一遍（不挂到场景里），返回碰撞盒、门和每间店的范围，然后丢掉网格
   IN._planShop = function (rec) {
     if (rec.type !== 'shop') return null;
@@ -1822,6 +2006,14 @@
       // 雨雪着色器只收前几个：玩家所在的那栋排第一个
       if (here) IN.boxes.unshift(bx); else IN.boxes.push(bx);
     }
+    // 封面那间的世界包围盒（没打开就给一个空盒子）
+    let hst = null;
+    for (const st of open.values()) if (st.shown && st.heroRect) hst = st;
+    if (hst) {
+      const r = hst.heroRect, gz = hst.ch.group.position.z, xs = [], zs = [];
+      for (const [bx, bz] of [[r.x0, r.z0], [r.x1, r.z0], [r.x0, r.z1], [r.x1, r.z1]]) { xs.push(hst.ox + hst.c * bx + hst.s * bz); zs.push(hst.oz - hst.s * bx + hst.c * bz + gz); }
+      IU.uHeroMin.value.set(Math.min(...xs), sy + r.y0, Math.min(...zs)); IU.uHeroMax.value.set(Math.max(...xs), sy + r.y1, Math.max(...zs));
+    } else { IU.uHeroMin.value.set(1e6, 1e6, 1e6); IU.uHeroMax.value.set(-1e6, -1e6, -1e6); }
     // 4) 屋里的环境光跟着天色走；两盏补光灯跟着玩家所在楼层最近的顶灯走
     const night = H.sky.lightsOn || 0;
     const day = H.clamp(H.sky.hemi.intensity * 0.6 + H.sky.sun.intensity * 0.18, 0.08, 1);
@@ -1829,8 +2021,13 @@
     IU.uBounce.value.setRGB(1.0, 0.96, 0.9).multiplyScalar(0.05 + day * 0.3 + night * 0.08);
     if (IN.indoor) {
       const st = IN.indoor, [lx, lz] = toLocal(st, playerPos.x, playerPos.z), ly = playerPos.y - sy;
-      let list = st.lamps.g, yb = st.L ? st.L.Y(0) : 0;
+      let list = st.lamps.g, yb = st.L ? st.L.Y(0) : 0, inCab = false;
       if (st.L) { let f = 0; for (let k = 0; k < st.L.F; k++) if (st.L.Y(k) <= ly + 0.6) f = k; if (f > 0) { list = st.lamps.u; yb = st.L.Y(f); } }
+      // 人在电梯轿厢里：补光灯挂到轿厢顶灯下面（不然夜里轿厢里黑的）
+      if (st.el) {
+        const cab = st.L.cab, el = st.el;
+        if (lx > cab.x0 && lx < cab.x1 + 0.05 && lz > cab.z0 && lz < cab.z1 && ly > el.y - 0.3 && ly < el.y + cab.h) { list = [[(cab.x0 + cab.x1) / 2, cab.h - 0.2, (cab.z0 + cab.z1) / 2, null]]; yb = el.y; inCab = true; }
+      }
       // 先挑玩家所在房间里的灯（隔着墙的灯照不过来），房间里没有就用最近的
       const inRm = list.filter((p) => !p[3] || (lx > p[3].x0 - 0.2 && lx < p[3].x1 + 0.2 && lz > p[3].z0 - 0.2 && lz < p[3].z1 + 0.2));
       const near = (inRm.length ? inRm : list).map((p) => [p, (p[0] - lx) ** 2 + (p[2] - lz) ** 2]).sort((a, b) => a[1] - b[1]);
@@ -1839,7 +2036,7 @@
         if (!p || (i > 0 && inRm.length === 1)) { l.intensity = 0; return; }
         const x = st.ox + st.c * p[0][0] + st.s * p[0][2], z = st.oz - st.s * p[0][0] + st.c * p[0][2] + st.ch.group.position.z;
         l.position.set(x, sy + yb + p[0][1], z);
-        l.intensity = 0.9 + night * 0.9;
+        l.intensity = inCab ? 0.45 + night * 0.35 : 0.9 + night * 0.9; // 轿厢小、四壁是拉丝钢板，灯太亮会照出一块刺眼的高光
       });
     } else lights.forEach((l) => { l.intensity = 0; });
   };
@@ -1851,6 +2048,7 @@
   // ---------- 碰撞（只给步行的玩家用） ----------
   function pushOut(o, y, r, b) {
     if (y + 1.7 < b.y0 || y > b.y1) return;
+    if (b.top !== undefined && y >= b.top - H.world.STEP) return; // 能站的顶：脚够高了就踩上去，不挡
     const cx = H.clamp(o.x, b.x0, b.x1), cz = H.clamp(o.z, b.z0, b.z1);
     const dx = o.x - cx, dz = o.z - cz, d2 = dx * dx + dz * dz;
     if (d2 >= r * r) return;
@@ -1900,18 +2098,56 @@
     }
     return null;
   };
-  IN.surfaceY = function (x, z, yNow) {
+  // walker = 步行的玩家：只有他能踩"能站的顶"（床、沙发坐面、茶几……），规则和 pushOut 共用 STEP / LEDGE
+  IN.surfaceY = function (x, z, yNow, walker) {
     let best = -Infinity;
-    const sy = SY();
+    const sy = SY(), STEP = H.world.STEP, LG = H.world.LEDGE;
     for (const st of open.values()) {
       if (!st.shown) continue;
       const [lx, lz] = toLocal(st, x, z);
       const R = st.rec;
       if (lx < -1.5 || lx > R.D + 0.2 || lz < -R.W / 2 - 0.2 || lz > R.W / 2 + 0.2) continue;
-      const h = st.surf(st, lx, lz, yNow - sy);
+      const ly = yNow - sy;
+      const h = st.surf(st, lx, lz, ly);
       if (h > -Infinity && h + sy > best) best = h + sy;
+      if (walker && st.tops) for (const t of st.tops) {
+        if (ly < t.top - STEP || t.top + sy <= best) continue;
+        const dx = Math.max(t.x0 - lx, 0, lx - t.x1), dz = Math.max(t.z0 - lz, 0, lz - t.z1);
+        if (dx * dx + dz * dz <= LG * LG) best = t.top + sy;
+      }
     }
     return best;
+  };
+  // 头顶限位（渲染坐标）：楼板底、阳台板底、门楣、店里吊顶；只算比站直时头顶还高的（矮的算墙）
+  IN.ceilingY = function (x, z, feet, r = 0.32) {
+    let best = Infinity;
+    const sy = SY();
+    for (const st of open.values()) {
+      if (!st.shown || !st.ceil) continue;
+      const [lx, lz] = toLocal(st, x, z);
+      const R = st.rec;
+      if (lx < -2 || lx > R.D + 1 || lz < -R.W / 2 - 1 || lz > R.W / 2 + 1) continue;
+      const ly = feet - sy, need = ly + 1.7;
+      const c = st.ceil(st, lx, lz, ly, r);
+      if (c >= need && c + sy < best) best = c + sy;
+      for (const hd of st.heads || []) {
+        if (hd.y < need || hd.y + sy >= best) continue;
+        const dx = Math.max(hd.x0 - lx, 0, lx - hd.x1), dz = Math.max(hd.z0 - lz, 0, lz - hd.z1);
+        if (dx * dx + dz * dz < r * r) best = hd.y + sy;
+      }
+    }
+    return best;
+  };
+  // 起跳时人在不在楼里（含阳台）：现算当前位置，不用上一帧的 IN.indoor —— 在屋里、阳台上都按室内跳
+  IN.indoorAt = function (p) {
+    const sy = SY();
+    for (const st of open.values()) {
+      if (!st.shown) continue;
+      const [lx, lz] = toLocal(st, p.x, p.z), ly = p.y - sy;
+      if (inFoot(st, lx, lz, ly)) return true;
+      if (st.balc && lx > -1.4 && lx <= 0.05 && ly > 1 && st.balc.some((b) => lz > b.z0 && lz < b.z1)) return true;
+    }
+    return false;
   };
 
   // ---------- 瞄准互动：门、电梯按钮 ----------

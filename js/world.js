@@ -133,6 +133,7 @@
     P.box('trim', 0.1, 0.42, 2.4, -0.05, 2.62, 0, '#2b7bb9', 0.05, 1);
     P.add('sign', BD().quad(2.2, 0.36, H.tex.signCell(23)), -0.11, 2.83, 0, BD().FACE.front, 0xffffff);
     P.solid(1.65, 1.85, -2.3, 2.3); P.solid(0.2, 1.8, -2.3, -2.1);
+    P.ceil(-0.1, 1.9, -2.4, 2.4, 2.55); // 顶棚底面
     P.circle(0.1, -2.25, 0.1); P.circle(0.1, 2.25, 0.1);
     ch.stops.push({ x: P.tx(1.3, 0), z: P.tz(1.3, 0), side });
   }
@@ -307,6 +308,7 @@
     // 拱形雨棚
     // 拱脚在 YD+1.95，立柱站在桥面板外沿（z=±1.66），顶到拱面
     B.add('canopy', archGeo(), 0, YD + 1.95, BZ, 0, 0xffffff);
+    ch.ceils.push({ k: 'arch', x0: -XS - 0.3, x1: XS + 0.3, zc: BZ, hw: 2.0, h: 0.84, y: YD + 1.95 }); // 拱面：半椭圆，半宽 2、高 0.84
     for (let x = -XS; x <= XS + 0.01; x += XS / 4) for (const sd of [-1, 1]) B.add('metal', BD().cyl(0.04, 2.44, 0.015, 8), x, YD + 1.22, BZ + sd * 1.66, 0, mc);
     for (const sd of [-1, 1]) B.add('metal', BD().cyl(0.035, XS * 2 + 0.6, 0.012, 8), 0, YD + 2.43, BZ + sd * 1.66, 0, '#c9ced4', { rz: Math.PI / 2 });
     // 两头的台阶（右侧往 +z 下，左侧往 -z 下，中心对称）
@@ -407,7 +409,7 @@
   }
 
   function makeChunk(idx) {
-    const ch = { idx, group: new THREE.Group(), boxes: [], circles: [], lamps: [], stops: [], surf: [], paths: [], wins: [], parked: [], blds: [], hide: {}, ready: false, bridge: isBridge(idx) };
+    const ch = { idx, group: new THREE.Group(), boxes: [], circles: [], lamps: [], stops: [], surf: [], tops: [], ceils: [], paths: [], wins: [], parked: [], blds: [], hide: {}, ready: false, bridge: isBridge(idx) };
     ch.group.position.z = idx * CH - Wd.originZ;
     ch.gen = genChunk(ch);
     Wd.group.add(ch.group);
@@ -467,6 +469,7 @@
       if (lz < -r - 1 || lz > CH + r + 1) continue;
       for (const bx of ch.boxes) {
         if (bx.y1 !== undefined && (pos.y + 1.7 < bx.y0 || pos.y > bx.y1)) continue;
+        if (walker && bx.top !== undefined && pos.y >= bx.top - Wd.STEP) continue; // 能站的顶：脚已经够高，踩上去而不是挡
         if (walker && bx.bid && IN && IN.isOpen(bx.bid)) continue;
         const cx = H.clamp(pos.x, bx.x0, bx.x1), cz = H.clamp(lz, bx.z0, bx.z1);
         const dx = pos.x - cx, dz = lz - cz;
@@ -502,12 +505,20 @@
   };
 
   // 能站的表面高度：地面、天桥台阶、桥面。只认比当前脚底高不超过 0.5m 的面（走到桥下不会被"吸"上桥）
-  Wd.surfaceY = function (x, z, yNow) {
+  // 能站的顶（长椅、矮墙、家具）的规则，和碰撞共用同一个阈值：脚 ≥ 顶 - STEP 才托、低于才挡；圆心离顶面边缘 LEDGE 以内都算踩在上面
+  Wd.STEP = 0.15; Wd.LEDGE = 0.2;
+  // walker = 步行的玩家（只有他能踩能站的顶；单车、召唤时的落点不算）
+  Wd.surfaceY = function (x, z, yNow, walker) {
     let best = Wd.groundY(x);
     for (const ch of Wd.chunks.values()) {
-      if (!ch.surf.length) continue;
+      if (!ch.surf.length && !(walker && ch.tops.length)) continue;
       const lz = z - ch.group.position.z;
       if (lz < -2 || lz > CH + 2) continue;
+      if (walker) for (const t of ch.tops) {
+        if (yNow < t.top - Wd.STEP || t.top <= best) continue;
+        const dx = Math.max(t.x0 - x, 0, x - t.x1), dz = Math.max(t.z0 - lz, 0, lz - t.z1);
+        if (dx * dx + dz * dz <= Wd.LEDGE * Wd.LEDGE) best = t.top;
+      }
       for (const sf of ch.surf) {
         if (x < sf.x0 || x > sf.x1) continue;
         let hgt;
@@ -516,7 +527,26 @@
         if (hgt <= yNow + 0.5 && hgt > best) best = hgt;
       }
     }
-    if (H.interior) { const iy = H.interior.surfaceY(x, z, yNow); if (iy > best) best = iy; }
+    if (H.interior) { const iy = H.interior.surfaceY(x, z, yNow, walker); if (iy > best) best = iy; }
+    return best;
+  };
+  // 头顶限位：脚在 feet 时，半径 r 的人头顶上方最低的那块顶（只算比站直时头顶还高的，矮的算墙）
+  Wd.ceilingY = function (x, z, feet, r = 0.32) {
+    let best = Infinity;
+    const need = feet + 1.7;
+    for (const ch of Wd.chunks.values()) {
+      if (!ch.ceils.length) continue;
+      const lz = z - ch.group.position.z;
+      if (lz < -4 || lz > CH + 4) continue;
+      for (const c of ch.ceils) {
+        if (x < c.x0 - r || x > c.x1 + r) continue;
+        let y;
+        if (c.k === 'arch') { const d = Math.abs(lz - c.zc) - r; if (d >= c.hw) continue; const e = Math.min(c.hw, Math.abs(lz - c.zc) + r); y = c.y + c.h * Math.sqrt(Math.max(0, 1 - (e / c.hw) ** 2)); }
+        else { if (lz < c.z0 - r || lz > c.z1 + r) continue; const dx = Math.max(c.x0 - x, 0, x - c.x1), dz = Math.max(c.z0 - lz, 0, lz - c.z1); if (dx * dx + dz * dz >= r * r) continue; y = c.y; }
+        if (y >= need && y < best) best = y;
+      }
+    }
+    if (H.interior) { const iy = H.interior.ceilingY(x, z, feet, r); if (iy < best) best = iy; }
     return best;
   };
   // 附近天桥的行人路线（渲染坐标）

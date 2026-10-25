@@ -126,6 +126,7 @@
     const v = player.veh;
     if (!v) {
       if (H.interior.indoor) return; // 屋里不能隔着墙上车
+      if (!player.onGround) return;  // 跳在半空不能上车
       const ref = H.veh.nearest(player.pos);
       if (!ref) return;
       const nv = H.veh.take(ref);
@@ -222,7 +223,12 @@
     H.audio.init(); H.audio.setVolume(H.audio.volume);
     $('title').classList.add('hide');
     $('hud').classList.remove('hidden');
-    player.pos.set(SPAWN_X, C.SY, -4); player.footY = player.pos.y; player.yaw = 0; player.pitch = -0.02;
+    // 封面是夜里下小雨；进游戏换回玩家自己选的天气和时间
+    if (cover) {
+      H.weather.set(H.weather.TYPES[wk] ? wk : 'clear', true); refreshWeatherUI();
+      H.sky.hours = (TIMES[tk] || TIMES.day)[1];
+    }
+    player.pos.set(SPAWN_X, C.SY, -4); player.footY = player.pos.y; player.yaw = 0; player.pitch = -0.02; camera.fov = 72;
     lock();
     setPaused(false);
     toast('欢迎来到 404 高速路 · 走到车边按 F 上车 · C 召唤汽车 · B 召唤自行车');
@@ -256,18 +262,25 @@
     H.people.collide(p.pos, 0.3);
     H.veh.collideAgainst(p.pos, 0.3, null);
     // 跳 / 落地。脚下的面：地面、路缘（15cm 自动迈上去）、天桥台阶和桥面
-    const gy = H.world.surfaceY(p.pos.x, p.pos.z, p.pos.y);
+    // 脚下的面：地面、路缘、天桥、楼里的地面和楼梯、能站的顶（长椅、矮墙、床、沙发坐面、茶几……只有步行的人能踩）
+    const y0 = p.pos.y;
+    const gy = H.world.surfaceY(p.pos.x, p.pos.z, y0, true);
     // 站在电梯轿厢里：起跳带上轿厢的速度，头顶不能穿过轿厢顶
-    const plat = indoor ? H.interior.platform(p.pos.x, p.pos.z, p.pos.y) : null;
+    const plat = indoor ? H.interior.platform(p.pos.x, p.pos.z, y0) : null;
     if (keys.Space && p.onGround) {
-      p.vy = (indoor ? 3.2 : 4.3) + (plat ? plat.vy : 0); p.onGround = false; // 屋里层高有限，跳低一点
+      // 跳高：室外顶点约 1.15m，屋里（含阳台）约 0.64m。在不在屋里按当前位置现算（IN.indoor 是上一帧的）
+      p.vy = (H.interior.indoorAt(p.pos) ? 3.92 : 5.27) + (plat ? plat.vy : 0); p.onGround = false;
       // 起跳那一下：水平速度直接到位（不等加速），往前蹬地再多给一点
       if (f || s) { p.vx = vx * 1.12; p.vz = vz * 1.12; }
     }
-    p.vy -= 12 * dt; p.pos.y += p.vy * dt;
-    if (plat && p.pos.y + 1.75 > plat.top) { p.pos.y = plat.top - 1.75; p.vy = Math.min(p.vy, plat.vy); }
+    // 竖直方向按匀加速精确积分：跳多高和帧率无关
+    p.pos.y += p.vy * dt - 6 * dt * dt; p.vy -= 12 * dt;
+    // 头顶限位：楼板、门楣、阳台板、公交亭顶棚、遮阳篷、门廊顶、天桥拱棚、电梯轿厢顶；绝不把人压到脚下的面以下
+    let cy = H.world.ceilingY(p.pos.x, p.pos.z, y0);
+    if (plat) cy = Math.min(cy, plat.top);
+    if (p.pos.y + 1.75 > cy) { p.pos.y = Math.max(gy, cy - 1.75); p.vy = Math.min(p.vy, plat ? plat.vy : 0); }
     const wet = indoor ? 0 : H.weather.wet, snowy = indoor ? 0 : H.weather.snowCover;
-    if (p.pos.y <= gy) { if (!p.onGround && p.vy < -3) H.audio.step(wet, snowy, true); p.pos.y = gy; p.vy = 0; p.onGround = true; }
+    if (p.pos.y <= gy) { if (!p.onGround && p.vy < -2) H.audio.step(wet, snowy, true); p.pos.y = gy; p.vy = 0; p.onGround = true; }
     else if (p.onGround && p.pos.y - gy < 0.35) { p.pos.y = gy; p.vy = 0; } // 下台阶时贴着走，不一蹦一蹦
     else p.onGround = false; // 从高处走下去是在下落：不能空中再起跳，惯性照空中算
     p.footY = H.damp(p.footY, p.pos.y, 18, dt);
@@ -344,11 +357,23 @@
     const env = { wet: H.weather.wet, snow: H.weather.snowCover, hail: H.weather.hailCover };
 
     if (!started) {
-      // 标题画面：镜头沿着路慢慢往前飘
-      attract.t += realDt; attract.z -= realDt * 7;
-      camera.position.set(-1.8 + Math.sin(attract.t * 0.2) * 0.5, 1.9 + Math.sin(attract.t * 0.5) * 0.08, attract.z);
-      camera.rotation.set(-0.03, Math.sin(attract.t * 0.13) * 0.25, 0, 'YXZ');
-      player.pos.z = attract.z;
+      attract.t += realDt;
+      if (cover) {
+        // 封面：站在 K403+997 那间客厅里，镜头只有呼吸一样的轻微晃动
+        player.pos.copy(cover.pos); player.footY = cover.pos.y;
+        camera.position.set(cover.pos.x, cover.pos.y + 1.62 + Math.sin(attract.t * 0.6) * 0.004, cover.pos.z);
+        // 构图是按 2:1 调的（电视右边框在视线右边约 55°）：屏幕窄时把竖直视角放宽（最多 95°），还装不下就往电视那边转
+        const tanV = Math.max(Math.tan(36 * Math.PI / 180), 1.45 / camera.aspect);
+        camera.fov = Math.min(95, Math.atan(tanV) * 360 / Math.PI);
+        const halfH = Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect), turn = Math.max(0, Math.atan(1.45) - halfH);
+        camera.rotation.set(cover.pitch + Math.sin(attract.t * 0.23) * 0.004, cover.yaw - turn + Math.sin(attract.t * 0.17) * 0.008, 0, 'YXZ');
+      } else {
+        // 标题画面（封面那栋楼没找到时）：镜头沿着路慢慢往前飘
+        attract.z -= realDt * 7;
+        camera.position.set(-1.8 + Math.sin(attract.t * 0.2) * 0.5, 1.9 + Math.sin(attract.t * 0.5) * 0.08, attract.z);
+        camera.rotation.set(-0.03, Math.sin(attract.t * 0.13) * 0.25, 0, 'YXZ');
+        player.pos.z = attract.z;
+      }
       dt = realDt;
     } else if (!paused) {
       if (inCar()) {
@@ -367,7 +392,7 @@
     // 世界生成；走近公寓 / 商铺时把楼"打开"（现场生成室内）
     H.world.update(camera.position.z, camera.position, started ? 5 : 8);
     const pv0 = player.veh;
-    H.interior.update(dt, camera.position, pv0 ? tmpV2.set(pv0.state.x, pv0.state.y || 0, pv0.state.z) : player.pos, started && !pv0);
+    H.interior.update(dt, camera.position, pv0 ? tmpV2.set(pv0.state.x, pv0.state.y || 0, pv0.state.z) : player.pos, (started || !!cover) && !pv0);
     // 天气 + 天空
     const lightLevel = H.clamp((H.sky.hemi.intensity * 0.6 + H.sky.sun.intensity * 0.18), 0.12, 1);
     wctx.light = lightLevel;
@@ -401,7 +426,7 @@
       lampLights.forEach((l, i) => { if (near[i]) l.position.set(near[i].x, near[i].y - 0.3, near[i].z); });
     }
     lampLights.forEach((l, i) => { l.intensity = i < near.length ? lo * 2.0 : 0; });
-    if (lo > 0.5 && H.veh.bikeLight === undefined) H.veh.bikeLight = true;
+    if (started && lo > 0.5 && H.veh.bikeLight === undefined) H.veh.bikeLight = true;
 
     // 车
     for (const v of H.veh.list) if (v.type === 'car') v.updateLights(lo);
@@ -485,6 +510,12 @@
   H.world.drawDist = 200; H.world.update(0, camera.position, 0, true); H.world.drawDist = QUALITY[quality].dist;
   H.people.populate(QUALITY[quality].peds, 0);
   console.log('初始生成耗时', Math.round(performance.now() - t0), 'ms');
+  // 封面：K403+997 那间公寓客厅，夜里下小雨（这栋楼先同步生成好再撤掉加载画面）
+  const cover = H.interior.cover();
+  if (cover) {
+    H.weather.set('drizzle', true); H.sky.hours = 22;
+    $('coverTag').textContent = `${cover.km} 公寓的房间`;
+  }
   $('loading').classList.add('hide');
   $('startBtn').disabled = false;
   // 调试：把当前画面存到 tools/shots/（只在本地服务器下有效）
@@ -495,6 +526,6 @@
   }
   // 调试：快进若干秒（不等真实时间）
   function step(sec, fdt = 1 / 30) { const n = Math.round(sec / fdt); for (let i = 0; i < n; i++) tick(last + fdt * 1000); last = performance.now(); }
-  window.__h404 = { renderer, scene, camera, player, setWeather, setTime, start, shot, step, keys, useVehicle, summon, quality: () => quality, interior: H.interior };
+  window.__h404 = { cover, renderer, scene, camera, player, setWeather, setTime, start, shot, step, keys, useVehicle, summon, quality: () => quality, interior: H.interior };
   requestAnimationFrame(frame);
 })();

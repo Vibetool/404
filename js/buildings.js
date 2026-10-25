@@ -76,6 +76,18 @@
       this.ch.boxes.push(bx);
     }
     circle(lx, lz, r) { this.ch.circles.push({ x: this.tx(lx, lz), z: this.tz(lx, lz), r }); }
+    _aabb(x0, x1, z0, z1) {
+      const xs = [this.tx(x0, z0), this.tx(x1, z0), this.tx(x0, z1), this.tx(x1, z1)];
+      const zs = [this.tz(x0, z0), this.tz(x1, z0), this.tz(x0, z1), this.tz(x1, z1)];
+      return { x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
+    }
+    // 能跳上去站的顶（长椅座面、矮墙）：h = 顶面离地高。步行的人脚低于"顶 - STEP"时它是墙，脚高过去就踩在上面（H.world.collide / surfaceY）；
+    // 单车等非步行的一律当实心挡
+    solidTop(x0, x1, z0, z1, h) { const b = this._aabb(x0, x1, z0, z1); b.top = this.oy + h; this.ch.boxes.push(b); this.ch.tops.push(b); }
+    // 头顶限位（顶棚、雨棚、门廊顶的底面）：跳起来头顶不能穿过去
+    ceil(x0, x1, z0, z1, h) { const b = this._aabb(x0, x1, z0, z1); b.y = this.oy + h; this.ch.ceils.push(b); }
+    // 能直接走上去的台阶面（不超过 0.5 自动迈上）
+    step(x0, x1, z0, z1, h) { const b = this._aabb(x0, x1, z0, z1); b.k = 'deck'; b.y = this.oy + h; this.ch.surf.push(b); }
   }
   BD.Placer = Placer;
   BD.FACE = FACE;
@@ -177,6 +189,8 @@
         P.wnd('gdoor', [0, 2], Math.min(2.1, bw - 0.4), 2.6, gw, 1.45, bz, 'front');
         P.box('trim', 1.7, 0.2, Math.min(3.2, bw + 0.4), sb - 0.8, 3.0, bz, trim, 0.09, 1);
         P.box('concrete', 1.1, 0.12, Math.min(2.8, bw), sb - 0.55, 0, bz, base, 0.04, 1);
+        P.step(sb - 1.1, sb, bz - Math.min(2.8, bw) / 2, bz + Math.min(2.8, bw) / 2, 0.12);
+        P.ceil(sb - 1.65, sb + 0.05, bz - Math.min(3.2, bw + 0.4) / 2, bz + Math.min(3.2, bw + 0.4) / 2, 3.0);
         if (rng.chance(0.6)) P.add('sign', quad(1.9, 0.3, T().signCell(rng.chance(0.5) ? 20 : 21)), gw - 0.02, 3.4, bz, FACE.front, 0xffffff);
       } else {
         P.wnd('res', resCell(rng, kind), Math.min(1.9, bw - 0.6), 1.9, gw, 1.75, bz, 'front', trim);
@@ -315,6 +329,9 @@
     P.add('trim', cyl(0.07, 2.3, 0.03, 10), sb - 1.02, 1.6, dz - 0.82, 0, '#ffffff');
     P.add('trim', cyl(0.07, 2.3, 0.03, 10), sb - 1.02, 1.6, dz + 0.82, 0, '#ffffff');
     P.box('concrete', 1.1, 0.3, 1.8, sb - 0.55, 0, dz, '#c8c2b8', 0.05, 1);
+    P.step(sb - 1.1, sb, dz - 0.9, dz + 0.9, 0.3);                       // 门廊台阶：走过去就迈上
+    P.ceil(sb - 1.145, sb, dz - 1.0, dz + 1.0, 2.72);                   // 门廊顶
+    P.circle(sb - 1.02, dz - 0.82, 0.08); P.circle(sb - 1.02, dz + 0.82, 0.08);
     const shutters = rng.chance(0.4);
     // 正面：wall=sb, along=z；侧面：wall=侧墙 z', along=x'
     const winAt = (wall, y, along, face, lit) => {
@@ -360,10 +377,11 @@
         P.box('concrete', 0.32, 0.65, len, 0.25, 0, zm, '#e7e0d4', 0.08, 1);
         P.box('trim', 0.42, 0.1, len + 0.08, 0.25, 0.65, zm, '#ffffff', 0.05, 1);
       }
-      P.solid(0.05, ftype === 'hedge' ? 0.8 : 0.4, z0, z1);
+      if (ftype === 'wall') P.solidTop(0.04, 0.46, z0, z1, 0.75); // 矮墙压顶能跳上去走
+      else P.solid(0.05, ftype === 'hedge' ? 0.8 : 0.4, z0, z1);
     };
     fenceSeg(0.3, dz - 0.65); fenceSeg(dz + 0.65, w - 0.3);
-    for (const z of [dz - 0.68, dz + 0.68]) P.box('trim', 0.2, 1.15, 0.2, 0.2, 0, z, '#ffffff', 0.07, 1);
+    for (const z of [dz - 0.68, dz + 0.68]) { P.box('trim', 0.2, 1.15, 0.2, 0.2, 0, z, '#ffffff', 0.07, 1); P.solid(0.1, 0.3, z - 0.1, z + 0.1); }
     // 侧面和后面：木板围栏（大块，省面数）
     const side = (zz) => {
       P.box('wood', back - 0.3, 1.1, 0.06, (back + 0.3) / 2, 0, zz, '#d8c3a5', 0.03, 1);
@@ -374,6 +392,7 @@
     // 信箱
     P.box('metal', 0.08, 1.0, 0.08, 0.45, 0, dz + 1.05, '#555a60', 0.03, 1);
     P.box('metal', 0.32, 0.3, 0.45, 0.45, 1.0, dz + 1.05, accent, 0.1, 1);
+    P.solid(0.29, 0.61, dz + 0.825, dz + 1.275);
     // 院子里的小树、花坛、长椅
     const tz = dz < w / 2 ? w - 1.6 : 1.6;
     BD.tree(P, rng.range(1.6, Math.max(1.7, sb - 1.6)), tz, rng.range(0.65, 0.9), rng);
@@ -391,7 +410,9 @@
     let p = at(0, 0); P.box('wood', 0.45, 0.07, 1.6, p[0], 0.42, p[1], '#a8754a', 0.03, 1, lry);
     p = at(0.2, 0); P.box('wood', 0.07, 0.4, 1.6, p[0], 0.55, p[1], '#a8754a', 0.03, 1, lry);
     for (const k of [-0.65, 0.65]) { p = at(0, k); P.box('metal', 0.4, 0.42, 0.06, p[0], 0, p[1], '#3d4248', 0.02, 1, lry); }
-    p = at(0, 0); P.circle(p[0], p[1] - 0.4, 0.3); P.circle(p[0], p[1] + 0.4, 0.3);
+    // 座面能跳上去站（靠背不单独挡）；碰撞框跟着长椅转（以前两个圆总按 z 摆，转了 90° 的长椅两头能穿过去）
+    const cs = [at(-0.225, -0.8), at(0.235, -0.8), at(-0.225, 0.8), at(0.235, 0.8)];
+    P.solidTop(Math.min(...cs.map((q) => q[0])), Math.max(...cs.map((q) => q[0])), Math.min(...cs.map((q) => q[1])), Math.max(...cs.map((q) => q[1])), 0.49);
   }
   BD.bench = bench;
 
@@ -425,6 +446,8 @@
       const vr = 1 - (row + 0.5) / 4;
       P.box('awning', 1.5, 0.05, uw - 0.5, sb - 0.72, 2.72, uz, 0xffffff, 0.02, 1, 0,
         { rz: 0.32, uvf: (u2, v2) => [v2 / 3.2, vr] });
+      // 遮阳篷往街那边斜下去：分三段登记头顶限位，每段取这一段最低的高度
+      for (let k = 0; k < 3; k++) { const xa = sb - 1.44 + k * 0.48; P.ceil(xa, xa + 0.48, uz - (uw - 0.5) / 2, uz + (uw - 0.5) / 2, 2.72 + (xa - (sb - 0.72)) * Math.tan(0.32)); }
       const prop = rng.int(0, 3);
       if (cafe && prop < 3) {
         for (const tzz of [uz - uw * 0.22, uz + uw * 0.18]) {
@@ -464,7 +487,7 @@
   BD.plaza = function (P, w, rng) {
     P.box('grass', 9, 0.08, w - 0.6, 9.0, -0.03, w / 2, '#ffffff', 0.04, 1);
     P.box('concrete', 0.35, 0.42, w - 0.6, 4.35, 0, w / 2, '#d9d2c4', 0.12, 1);
-    P.solid(4.15, 4.55, 0.3, w - 0.3);
+    P.solidTop(4.15, 4.55, 0.3, w - 0.3, 0.42);
     const n = Math.max(2, Math.floor(w / 5));
     for (let k = 0; k < n; k++) BD.tree(P, rng.range(7, 12), (w / n) * (k + 0.5) + (rng() - 0.5) * 1.5, rng.range(0.85, 1.2), rng);
     for (let k = 0; k < 2; k++) bench(P, 5.4, w * (0.3 + 0.4 * k), 0, rng);

@@ -319,6 +319,64 @@
       });
       T.woodGrain = toTex(c);
     }
+    // 室内墙面的淡纹理（抹灰的深浅斑驳 + 一点滚筒刷痕）：灰度围绕 0.5，着色器里按"封面那间满强度、别处一半"叠到底色上
+    {
+      const S = 256, n1 = tileNoise(S, 4, 4, 131, 0.55), n2 = tileNoise(S, 32, 2, 137, 0.5);
+      const c = grayCanvas(n1, S, (v, i) => {
+        const x = i % S;
+        const roll = Math.sin((x / S) * Math.PI * 2 * 9 + v * 6) * 0.012;
+        const k = (0.5 + (v - 0.5) * 0.17 + (n2[i] - 0.5) * 0.05 + roll) * 255;
+        return [k, k, k];
+      });
+      T.wallI = toTex(c, true, false);
+    }
+    // 布料（沙发、床品）：平纹经纬交织 + 粗细不匀的纱（亚麻感），一张 = 0.3m；同样围绕 0.5
+    {
+      const S = 256, N = 40, cs = S / N, slub = tileNoise(S, 8, 3, 141, 0.5);
+      const c = grayCanvas(slub, S, (v, i) => {
+        const x = i % S, y = (i / S) | 0, ix = Math.floor(x / cs), iy = Math.floor(y / cs);
+        const fx = (x - ix * cs) / cs, fy = (y - iy * cs) / cs;
+        const warp = (ix + iy) & 1, shade = warp ? Math.sin(fx * Math.PI) : Math.sin(fy * Math.PI);
+        const k = (0.5 + (shade - 0.62) * 0.3 + (v - 0.5) * 0.3 + (H.hash(i, 142) - 0.5) * 0.05) * 255;
+        return [k, k, k];
+      });
+      T.fabric = toTex(c, true, false);
+    }
+    // 电视画面：四零三新闻
+    {
+      const Wd = 1024, Hd = 560, c = canvas(Wd, Hd), x = c.getContext('2d');
+      const FONT = '"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",sans-serif';
+      const bg = x.createLinearGradient(0, 0, Wd, Hd);
+      bg.addColorStop(0, '#0a1f47'); bg.addColorStop(0.55, '#16438c'); bg.addColorStop(1, '#0d2c63');
+      x.fillStyle = bg; x.fillRect(0, 0, Wd, Hd);
+      const glow = x.createRadialGradient(Wd * 0.62, Hd * 0.38, 10, Wd * 0.62, Hd * 0.38, Wd * 0.55);
+      glow.addColorStop(0, 'rgba(120,180,255,.35)'); glow.addColorStop(1, 'rgba(120,180,255,0)');
+      x.fillStyle = glow; x.fillRect(0, 0, Wd, Hd);
+      x.strokeStyle = 'rgba(160,200,255,.12)'; x.lineWidth = 2;
+      for (let k = 0; k < 9; k++) { x.beginPath(); x.ellipse(Wd * 0.62, Hd * 0.38, 60 + k * 46, 30 + k * 23, 0, 0, Math.PI * 2); x.stroke(); }
+      // 台标
+      x.fillStyle = '#d7322b'; x.beginPath(); x.roundRect(40, 34, 150, 66, 14); x.fill();
+      x.fillStyle = '#fff'; x.font = `900 50px ${FONT}`; x.textBaseline = 'middle'; x.fillText('403', 62, 69);
+      x.font = `700 22px ${FONT}`; x.fillStyle = '#dfe9ff'; x.fillText('NEWS', 204, 69);
+      // 直播角标 + 时间
+      x.fillStyle = '#e8402f'; x.beginPath(); x.roundRect(Wd - 214, 38, 76, 40, 10); x.fill();
+      x.fillStyle = '#fff'; x.font = `800 24px ${FONT}`; x.fillText('直播', Wd - 200, 59);
+      x.font = `700 28px ${FONT}`; x.fillText('22:00', Wd - 124, 59);
+      // 主标题
+      x.textAlign = 'center'; x.font = `900 128px ${FONT}`;
+      x.fillStyle = 'rgba(0,0,0,.35)'; x.fillText('四零三新闻', Wd / 2 + 4, 236);
+      x.fillStyle = '#ffffff'; x.fillText('四零三新闻', Wd / 2, 230);
+      x.fillStyle = '#d7322b'; x.fillRect(Wd / 2 - 250, 312, 500, 8);
+      // 下方字幕条
+      x.textAlign = 'left';
+      x.fillStyle = 'rgba(255,255,255,.95)'; x.fillRect(0, 392, Wd, 64);
+      x.fillStyle = '#d7322b'; x.fillRect(0, 392, 132, 64);
+      x.fillStyle = '#fff'; x.font = `900 32px ${FONT}`; x.fillText('快讯', 34, 425);
+      x.fillStyle = '#1b2433'; x.font = `700 30px ${FONT}`; x.fillText('K403+997 今夜有小雨 · 路面湿滑请慢行', 156, 425);
+      x.fillStyle = 'rgba(6,16,36,.9)'; x.fillRect(0, 466, Wd, 52);
+      x.fillStyle = '#cfe0ff'; x.font = `500 24px ${FONT}`; x.fillText('页面没找到，路找到了 · 404 高速路全线畅通 · 共享单车随叫随到 · 天桥每九个街区一座', 30, 493);
+      T.news = toTex(c, false, true);
+    }
   }
 
   // ---------- 窗户图集：4x4 格 ----------
