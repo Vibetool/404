@@ -151,6 +151,7 @@
     if (player.veh) { toast('先下车再召唤'); return; }
     if (H.interior.indoor) { toast('屋里放不下，到街上再召唤'); return; }
     if (H.interior.balcony) { toast('阳台上放不下，到街上再召唤'); return; }
+    if (!player.onGround) { toast('落地再召唤'); return; }
     const v = kind === 'car' ? H.veh.summonCar(player, key) : H.veh.summonBike(player, key);
     if (!v) { toast(kind === 'car' ? '附近停车带满了，换个地方再试' : '身边没地方放自行车'); return; }
     const name = kind === 'car' ? H.veh.MODELS[v.model].name : (v.style === 'shared' ? '共享单车' : '公路车');

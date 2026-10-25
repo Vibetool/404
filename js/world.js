@@ -543,7 +543,7 @@
         let y;
         if (c.k === 'arch') { const d = Math.abs(lz - c.zc) - r; if (d >= c.hw) continue; const e = Math.min(c.hw, Math.abs(lz - c.zc) + r); y = c.y + c.h * Math.sqrt(Math.max(0, 1 - (e / c.hw) ** 2)); }
         else { if (lz < c.z0 - r || lz > c.z1 + r) continue; const dx = Math.max(c.x0 - x, 0, x - c.x1), dz = Math.max(c.z0 - lz, 0, lz - c.z1); if (dx * dx + dz * dz >= r * r) continue; y = c.y; }
-        if (y >= need && y < best) best = y;
+        if ((c.k === 'arch' || y >= need) && y < best) best = y; // 拱棚上面站不了人，任何时候都算头顶
       }
     }
     if (H.interior) { const iy = H.interior.ceilingY(x, z, feet, r); if (iy < best) best = iy; }

@@ -85,7 +85,11 @@
     // 单车等非步行的一律当实心挡
     solidTop(x0, x1, z0, z1, h) { const b = this._aabb(x0, x1, z0, z1); b.top = this.oy + h; this.ch.boxes.push(b); this.ch.tops.push(b); }
     // 头顶限位（顶棚、雨棚、门廊顶的底面）：跳起来头顶不能穿过去
-    ceil(x0, x1, z0, z1, h) { const b = this._aabb(x0, x1, z0, z1); b.y = this.oy + h; this.ch.ceils.push(b); }
+    // 顶棚四面敞开、下面没有墙：头已经高过底面（从侧面助跑跳过来）时，同一块范围当一圈高处的墙挡住（thick = 往上挡多厚）
+    ceil(x0, x1, z0, z1, h, thick = 0.12) {
+      const b = this._aabb(x0, x1, z0, z1); b.y = this.oy + h; this.ch.ceils.push(b);
+      this.ch.boxes.push({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1, y0: b.y, y1: b.y + thick });
+    }
     // 能直接走上去的台阶面（不超过 0.5 自动迈上）
     step(x0, x1, z0, z1, h) { const b = this._aabb(x0, x1, z0, z1); b.k = 'deck'; b.y = this.oy + h; this.ch.surf.push(b); }
   }
@@ -190,7 +194,7 @@
         P.box('trim', 1.7, 0.2, Math.min(3.2, bw + 0.4), sb - 0.8, 3.0, bz, trim, 0.09, 1);
         P.box('concrete', 1.1, 0.12, Math.min(2.8, bw), sb - 0.55, 0, bz, base, 0.04, 1);
         P.step(sb - 1.1, sb, bz - Math.min(2.8, bw) / 2, bz + Math.min(2.8, bw) / 2, 0.12);
-        P.ceil(sb - 1.65, sb + 0.05, bz - Math.min(3.2, bw + 0.4) / 2, bz + Math.min(3.2, bw + 0.4) / 2, 3.0);
+        P.ceil(sb - 1.65, sb + 0.05, bz - Math.min(3.2, bw + 0.4) / 2, bz + Math.min(3.2, bw + 0.4) / 2, 3.0, 0.2);
         if (rng.chance(0.6)) P.add('sign', quad(1.9, 0.3, T().signCell(rng.chance(0.5) ? 20 : 21)), gw - 0.02, 3.4, bz, FACE.front, 0xffffff);
       } else {
         P.wnd('res', resCell(rng, kind), Math.min(1.9, bw - 0.6), 1.9, gw, 1.75, bz, 'front', trim);
@@ -330,7 +334,7 @@
     P.add('trim', cyl(0.07, 2.3, 0.03, 10), sb - 1.02, 1.6, dz + 0.82, 0, '#ffffff');
     P.box('concrete', 1.1, 0.3, 1.8, sb - 0.55, 0, dz, '#c8c2b8', 0.05, 1);
     P.step(sb - 1.1, sb, dz - 0.9, dz + 0.9, 0.3);                       // 门廊台阶：走过去就迈上
-    P.ceil(sb - 1.145, sb, dz - 1.0, dz + 1.0, 2.72);                   // 门廊顶
+    P.ceil(sb - 1.145, sb, dz - 1.0, dz + 1.0, 2.72, 0.14);             // 门廊顶
     P.circle(sb - 1.02, dz - 0.82, 0.08); P.circle(sb - 1.02, dz + 0.82, 0.08);
     const shutters = rng.chance(0.4);
     // 正面：wall=sb, along=z；侧面：wall=侧墙 z', along=x'
@@ -447,7 +451,7 @@
       P.box('awning', 1.5, 0.05, uw - 0.5, sb - 0.72, 2.72, uz, 0xffffff, 0.02, 1, 0,
         { rz: 0.32, uvf: (u2, v2) => [v2 / 3.2, vr] });
       // 遮阳篷往街那边斜下去：分三段登记头顶限位，每段取这一段最低的高度
-      for (let k = 0; k < 3; k++) { const xa = sb - 1.44 + k * 0.48; P.ceil(xa, xa + 0.48, uz - (uw - 0.5) / 2, uz + (uw - 0.5) / 2, 2.72 + (xa - (sb - 0.72)) * Math.tan(0.32)); }
+      for (let k = 0; k < 3; k++) { const xa = sb - 1.44 + k * 0.48; P.ceil(xa, xa + 0.48, uz - (uw - 0.5) / 2, uz + (uw - 0.5) / 2, 2.72 + (xa - (sb - 0.72)) * Math.tan(0.32), 0.25); }
       const prop = rng.int(0, 3);
       if (cafe && prop < 3) {
         for (const tzz of [uz - uw * 0.22, uz + uw * 0.18]) {

@@ -1434,15 +1434,29 @@
     st.tops = boxes.filter((b) => b.top !== undefined);
     // 头顶限位：各道门的门楣、阳台推拉门和一楼大门的门洞上沿（跳着穿门时头顶不能钻进去）；楼板和阳台板在 ceilApt 里算
     st.heads = [];
+    // 每个门楣同时是一块碰撞（门洞上方那段墙）：站着时它在头顶上（头顶限位管），头已经高过它（助跑跳过来）就当墙挡住
     const addHeads = (walls, yOff) => {
       for (const w of walls) for (const o of wallSegs(w).ops) if (o.top < w.y1) {
-        const b = wallBox(w.axis, w.at, w.th, Math.max(o.a, w.from), Math.min(o.b, w.to), 0, 1);
+        const b = wallBox(w.axis, w.at, w.th, Math.max(o.a, w.from), Math.min(o.b, w.to), yOff + o.top, yOff + w.y1);
+        boxes.push(b);
         st.heads.push({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1, y: yOff + o.top });
       }
     };
     addHeads(wG, L.Y(0)); for (let f = 1; f < F; f++) addHeads(wU, L.Y(f)); addHeads(wT, L.Y(F - 1));
-    for (let f = 1; f < F; f++) for (const h of hU.front) if (h.w.kind === 'bdoor') st.heads.push({ x0: -0.12, x1: T + 0.05, z0: h.u0, z1: h.u1, y: L.Y(f) + h.v1 });
-    if (gd) st.heads.push({ x0: -0.12, x1: T + 0.05, z0: gd.u0, z1: gd.u1, y: gd.v1 });
+    for (let f = 1; f < F; f++) for (const h of hU.front) if (h.w.kind === 'bdoor') {
+      st.heads.push({ x0: -0.12, x1: T + 0.05, z0: h.u0, z1: h.u1, y: L.Y(f) + h.v1 });
+      boxes.push({ x0: 0, x1: T, z0: h.u0, z1: h.u1, y0: L.Y(f) + h.v1, y1: L.Y(f + 1) }); // 阳台门洞上方的外墙
+    }
+    // 一楼大门：开着的双扇门上沿 2.23、横梁 2.22 起，头顶按 2.2 算；上面的横梁和亮子当墙
+    if (gd) { st.heads.push({ x0: -0.12, x1: T + 0.05, z0: gd.u0, z1: gd.u1, y: 2.2 }); boxes.push({ x0: -0.07, x1: T, z0: gd.u0, z1: gd.u1, y0: 2.2, y1: gH }); }
+    // 吊灯（客厅正中，灯头最低在天花下 0.61）：在它下面跳，头顶到这为止；站高了（沙发坐面、茶几上）它就是一小块墙
+    for (let f = 0; f < F; f++) for (const u of L.units) {
+      if (Math.floor(sels[f] / Math.pow(4, u.no - 1)) % 4 !== 3) continue;
+      const rm = u.living, cx = (rm.x0 + rm.x1) / 2, cz = (rm.z0 + rm.z1) / 2, yl = L.Y(f) + (f === 0 ? ceilG : ceilU) - 0.61;
+      const rc = { x0: cx - 0.15, x1: cx + 0.15, z0: cz - 0.15, z1: cz + 0.15 };
+      st.heads.push(Object.assign({ y: yl }, rc));
+      boxes.push(Object.assign({ y0: yl, y1: yl + 0.6 }, rc));
+    }
     st.ceil = ceilApt;
     st.lamps = { g: lampsG, u: lampsU };
     // 封面那间客厅的范围（局部坐标，一楼）：IN.update 每帧换算成世界坐标交给着色器
@@ -1461,9 +1475,33 @@
     if (lx > -0.08 && lx < L.D && lz > -L.W / 2 && lz < L.W / 2) {
       const inStair = lx > s.xa - r && lx < s.xm1 + r && lz > s.iz0 - r && lz < s.iz1 + r;
       const inShaft = lx > sh.x0 - r && lx < sh.x1 + r && lz > sh.z0 - r && lz < sh.z1 + r;
-      if (!inStair && !inShaft) { let f = 0; for (let k = 0; k < L.F; k++) if (L.Y(k) <= ly + 0.05) f = k; best = Math.min(best, L.Y(f + 1) - 0.26 - 0.16); }
+      if (inShaft) { /* 电梯井：轿厢顶另有限位 */ }
+      else if (inStair) best = Math.min(best, stairCeil(L, lx, lz, ly, r));
+      else { let f = 0; for (let k = 0; k < L.F; k++) if (L.Y(k) <= ly + 0.05) f = k; best = Math.min(best, L.Y(f + 1) - 0.26 - 0.16); }
     }
     return best;
+  }
+  // 楼梯井里的头顶：按所在梯段（z 选 A/B 跑，脚下梯面选第几层）取正上方那一跑的底板 / 休息平台底 / 楼板边，取 [x-r, x+r] 里最低的
+  function stairCeil(L, x, z, ly, r) {
+    const s = L.st, F = L.F;
+    const isA = Math.abs(z - (s.laneA[0] + s.laneA[1]) / 2) <= Math.abs(z - (s.laneB[0] + s.laneB[1]) / 2);
+    const hf = (k) => L.rise(k) / 2, rsf = (k) => hf(k) / NSTEP, tread = RUN / NSTEP;
+    const surf = (k) => (x <= s.xa ? (isA ? L.Y(k) : L.Y(k + 1)) : x >= s.xb ? L.Y(k) + hf(k)
+      : isA ? L.Y(k) + Math.min(hf(k), ((x - s.xa) / tread + 0.5) * rsf(k)) : L.Y(k) + hf(k) + Math.min(hf(k), ((s.xb - x) / tread + 0.5) * rsf(k)));
+    let k = 0; for (let q = 0; q < F - 1; q++) if (surf(q) <= ly + 0.05) k = q;
+    const u = k + 1;
+    if (u >= F - 1) return L.Y(F) - 0.42; // 最后一跑上面是屋顶楼板
+    const h = hf(u), x0 = x - r, x1 = x + r;
+    let c = Infinity;
+    if (isA) {
+      if (x0 < s.xa) c = Math.min(c, L.Y(u) - 0.42);
+      if (x1 > s.xa && x0 < s.xb) c = Math.min(c, L.Y(u) + (Math.max(x0, s.xa) - s.xa) / RUN * h - 0.2);
+    } else {
+      if (x0 < s.xa) c = Math.min(c, L.Y(u + 1) - 0.42);
+      if (x1 > s.xa && x0 < s.xb) c = Math.min(c, L.Y(u) + h + (s.xb - Math.min(x1, s.xb)) / RUN * h - 0.2);
+    }
+    if (x1 > s.xb) c = Math.min(c, L.Y(u) + h - 0.2);
+    return c;
   }
   // 公寓里某点能站的最高面（不高于 yNow+0.5）
   function surfApt(st, x, z, yNow) {
@@ -1833,8 +1871,15 @@
     st.tops = boxes.filter((b) => b.top !== undefined);
     // 头顶限位：后屋门的门楣、店门门框上沿；店里吊顶在 ceilShop
     st.heads = [];
-    for (const w of walls) for (const o of wallSegs(w).ops) if (o.top < w.y1) { const b = wallBox(w.axis, w.at, w.th, Math.max(o.a, w.from), Math.min(o.b, w.to), 0, 1); st.heads.push({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1, y: o.top }); }
-    r.units.forEach((u) => { const dz = u.z + u.dz; st.heads.push({ x0: -0.12, x1: T + 0.05, z0: dz - 0.6, z1: dz + 0.6, y: 2.58 }); });
+    for (const w of walls) for (const o of wallSegs(w).ops) if (o.top < w.y1) {
+      const b = wallBox(w.axis, w.at, w.th, Math.max(o.a, w.from), Math.min(o.b, w.to), o.top, w.y1);
+      boxes.push(b); st.heads.push({ x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1, y: o.top });
+    }
+    r.units.forEach((u) => {
+      const dz = u.z + u.dz;
+      st.heads.push({ x0: -0.12, x1: T + 0.05, z0: dz - 0.6, z1: dz + 0.6, y: 2.58 });
+      boxes.push({ x0: -0.05, x1: T, z0: dz - 0.53, z1: dz + 0.53, y0: 2.58, y1: gH }); // 店门上方的门框和墙
+    });
     st.ceil = (s2, lx, lz) => (lx > -0.05 && lx < D && lz > -W / 2 && lz < W / 2 ? CEIL - 0.02 : Infinity);
     // 外墙其余三面 + 分户处正面的墙垛
     boxes.push({ x0: D - T, x1: D + 0.05, z0: -W / 2, z1: W / 2, y0: 0, y1: r.Hb });
@@ -2129,7 +2174,8 @@
       if (lx < -2 || lx > R.D + 1 || lz < -R.W / 2 - 1 || lz > R.W / 2 + 1) continue;
       const ly = feet - sy, need = ly + 1.7;
       const c = st.ceil(st, lx, lz, ly, r);
-      if (c >= need && c + sy < best) best = c + sy;
+      // 楼板、梯段底板这类整片的顶不会像墙：门槛放宽到脚上 1.4（斜着往下的梯段底板一帧能降好几厘米，1.7 会一帧漏掉）
+      if (c >= ly + 1.4 && c + sy < best) best = c + sy;
       for (const hd of st.heads || []) {
         if (hd.y < need || hd.y + sy >= best) continue;
         const dx = Math.max(hd.x0 - lx, 0, lx - hd.x1), dz = Math.max(hd.z0 - lz, 0, lz - hd.z1);
