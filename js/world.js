@@ -220,24 +220,28 @@
       }
     }
   }
-  // 自行车架：几个倒 U 形的架子，中间插着共享单车（垂直于路）
+  // 自行车架：几个倒 U 形的架子，中间插着共享单车（垂直于路）。
+  // 架子间距 1.2m：立柱之间留 1.1m，骑上停在架子里的车（碰撞半径 0.42）能直接骑出去、原地掉头（原来 0.72 只剩 0.62，出不来）
   const BIKE_SHARED = ['#f5c518', '#ff7a1a', '#2f80ed', '#2ec4a5', '#f5c518', '#ff7a1a'];
   function bikeRack(B, ch, P, lz, rng) {
-    const n = rng.int(3, 5), gap = 0.72;
+    const n = rng.int(3, 5), gap = 1.2, slots = Math.max(2, Math.round(n * 0.72 / gap)); // 整排长度不超过原来的 3.6m
     let hoop = Wd._hoop;
     if (!hoop) { hoop = Wd._hoop = new THREE.TorusGeometry(0.34, 0.024, 8, 16, Math.PI); }
-    for (let k = 0; k <= n; k++) {
-      const z = lz + (k - n / 2) * gap;
+    for (let k = 0; k <= slots; k++) {
+      const z = lz + (k - slots / 2) * gap;
       // 倒 U 形：两根立柱 + 顶上的半圆
       for (const dx of [-0.34, 0.34]) { P.add('metal', BD().cyl(0.024, 0.45, 0.01, 8), 0.1 + dx, 0.225, z, 0, '#8c949c'); P.circle(0.1 + dx, z, 0.05); }
       P.add('metal', hoop, 0.1, 0.45, z, 0, '#8c949c');
     }
+    // 随机数照原来的次数取（n 个车位），只把落在新车位里的车摆出来：整条街其它随机摆设不跟着变
     for (let k = 0; k < n; k++) {
       if (rng() < 0.2) continue;
-      const z = lz + (k - (n - 1) / 2) * gap;
       const style = rng() < 0.85 ? 'shared' : 'road';
       const col = style === 'shared' ? rng.pick(BIKE_SHARED) : rng.pick(CAR_COLORS);
-      ch.parked.push({ kind: 'bike', style, color: col, x: P.tx(0.1, z), z: P.tz(0.1, z), yaw: P.ry + (rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2), rack: true });
+      const flip = rng() < 0.5;
+      if (k >= slots) continue;
+      const z = lz + (k - (slots - 1) / 2) * gap;
+      ch.parked.push({ kind: 'bike', style, color: col, x: P.tx(0.1, z), z: P.tz(0.1, z), yaw: P.ry + (flip ? Math.PI / 2 : -Math.PI / 2), rack: true });
     }
   }
 

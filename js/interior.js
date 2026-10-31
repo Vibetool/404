@@ -177,6 +177,41 @@
       if (!(skip & 16)) this.quad(k, [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [0, 0, -1], c);
       if (!(skip & 32)) this.quad(k, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1], c);
     }
+    // 倒角盒（家具的棱角稍微倒圆一点）：六个面各往里收 r，每条棱一条窄斜面、每个角一个小三角；
+    // 斜面上的法线从这个面过渡到那个面，看上去是圆过去的。一共 44 个三角形（圆角盒要 108 / 300 个）
+    cbox(k, x0, y0, z0, x1, y1, z1, c, r) {
+      r = Math.min(r, (x1 - x0) / 2 - 1e-4, (y1 - y0) / 2 - 1e-4, (z1 - z0) / 2 - 1e-4);
+      if (!(r > 5e-4)) { this.box(k, x0, y0, z0, x1, y1, z1, c); return; }
+      const b = this._b(k), lo = [x0, y0, z0], hi = [x1, y1, z1];
+      const inn = (ax, sd) => (sd ? hi[ax] - r : lo[ax] + r);
+      // 落在 (ax, sd) 那个面上的顶点：这一轴取面所在的平面，法线就是这个面的法线
+      const V = (ax, sd, t) => { const p = t.slice(), n = [0, 0, 0]; p[ax] = sd ? hi[ax] : lo[ax]; n[ax] = sd ? 1 : -1; return { p, n }; };
+      // UV 按 uvAx 那个面的投影（米）：一条斜面整条用同一种投影，纹理不会被挤成一条
+      const uvOf = (ax, p) => (ax === 0 ? [p[2], p[1]] : ax === 1 ? [p[0], p[2]] : [p[0], p[1]]);
+      const tri = (A, B, C, uvAx) => {
+        const e1 = [B.p[0] - A.p[0], B.p[1] - A.p[1], B.p[2] - A.p[2]], e2 = [C.p[0] - A.p[0], C.p[1] - A.p[1], C.p[2] - A.p[2]];
+        const gx = e1[1] * e2[2] - e1[2] * e2[1], gy = e1[2] * e2[0] - e1[0] * e2[2], gz = e1[0] * e2[1] - e1[1] * e2[0];
+        const flip = gx * (A.n[0] + B.n[0] + C.n[0]) + gy * (A.n[1] + B.n[1] + C.n[1]) + gz * (A.n[2] + B.n[2] + C.n[2]) < 0;
+        for (const v of flip ? [A, C, B] : [A, B, C]) this._v(b, v.p[0], v.p[1], v.p[2], v.n[0], v.n[1], v.n[2], c, uvOf(uvAx, v.p));
+      };
+      const quad = (A, B, C, D, uvAx) => { tri(A, B, C, uvAx); tri(A, C, D, uvAx); };
+      for (let ax = 0; ax < 3; ax++) for (const sd of [0, 1]) {
+        const u = (ax + 1) % 3, w = (ax + 2) % 3;
+        const q = (iu, iw) => { const t = [0, 0, 0]; t[u] = inn(u, iu); t[w] = inn(w, iw); return V(ax, sd, t); };
+        quad(q(0, 0), q(1, 0), q(1, 1), q(0, 1), ax);
+      }
+      for (let a = 0; a < 3; a++) for (let a2 = a + 1; a2 < 3; a2++) {
+        const c3 = 3 - a - a2;
+        for (const sa of [0, 1]) for (const sb of [0, 1]) {
+          const mk = (onA, ic) => { const t = [0, 0, 0]; t[c3] = inn(c3, ic); if (onA) { t[a2] = inn(a2, sb); return V(a, sa, t); } t[a] = inn(a, sa); return V(a2, sb, t); };
+          quad(mk(1, 0), mk(1, 1), mk(0, 1), mk(0, 0), a);
+        }
+      }
+      for (const sx of [0, 1]) for (const sy of [0, 1]) for (const sz of [0, 1]) {
+        const ss = [sx, sy, sz], t = [inn(0, sx), inn(1, sy), inn(2, sz)];
+        tri(V(0, ss[0], t), V(1, ss[1], t), V(2, ss[2], t), 0);
+      }
+    }
     // 任意几何（经矩阵变换后追加）
     geo(k, g, m, c, keepUV, uvAdd) {
       const b = this._b(k);
@@ -263,6 +298,8 @@
     // 用模板自己按面算好的 UV（米）：Sink 按每个顶点的法线重新投影的话，倒角那一圈会跳投影方向，布纹被挤成一条纯色带
     S.geo(k, g, m4((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2), c, true);
   }
+  // 家具腿：还是方腿，只在棱上倒一点点圆角（半径 = 腿宽的 1/4，最多 1cm）
+  function legBox(S, k, x0, y0, z0, x1, y1, z1, c) { S.cbox(k, x0, y0, z0, x1, y1, z1, c, Math.min(0.01, (x1 - x0) / 4, (z1 - z0) / 4)); }
   // 回转体（轮廓 [半径, 高] 从下往上）
   const LTH = new Map();
   function lathe(key, pts, seg) {
@@ -743,7 +780,7 @@
     const rs = 0.05 * q, rp = 0.07 * q;
     let [a0, a1] = zr(zw, sd, 0.02, 0.86);
     rbL(S, 'iFabric', xs0, 0.07, a0, xs1, 0.4, a1, fab, rs);
-    for (const [lx, lz] of [[xs0 + 0.06, a0 + 0.06], [xs1 - 0.1, a0 + 0.06], [xs0 + 0.06, a1 - 0.1], [xs1 - 0.1, a1 - 0.1]]) S.box('iDoor', lx, 0, lz, lx + 0.04, 0.08, lz + 0.04, dark);
+    for (const [lx, lz] of [[xs0 + 0.06, a0 + 0.06], [xs1 - 0.1, a0 + 0.06], [xs0 + 0.06, a1 - 0.1], [xs1 - 0.1, a1 - 0.1]]) legBox(S, 'iDoor', lx, 0, lz, lx + 0.04, 0.08, lz + 0.04, dark);
     const [b0, b1] = zr(zw, sd, 0.02, 0.24);
     rbL(S, 'iFabric', xs0, 0.36, b0, xs1, 0.86, b1, fab, rp);
     rbL(S, 'iFabric', xs0, 0.36, a0, xs0 + 0.17, 0.64, a1, fab, rs); rbL(S, 'iFabric', xs1 - 0.17, 0.36, a0, xs1, 0.64, a1, fab, rs);
@@ -756,8 +793,8 @@
     // 电视柜 + 电视（挂在柜子上方的墙前）
     const tl = Math.min(1.7, len), tx0 = xm - tl / 2, tx1 = xm + tl / 2;
     const [e0, e1] = zr(zt, -sd, 0.02, 0.44);
-    S.box('iDoor', tx0, 0.08, e0, tx1, 0.5, e1, wood);
-    for (const lx of [tx0 + 0.05, tx1 - 0.09]) S.box('iMetal', lx, 0, e0 + 0.05, lx + 0.04, 0.08, e1 - 0.05, dark);
+    S.cbox('iDoor', tx0, 0.08, e0, tx1, 0.5, e1, wood, 0.012);
+    for (const lx of [tx0 + 0.05, tx1 - 0.09]) legBox(S, 'iMetal', lx, 0, e0 + 0.05, lx + 0.04, 0.08, e1 - 0.05, dark);
     const front = sd < 0 ? e1 : e0, fdir = sd < 0 ? 1 : -1;  // 柜子朝沙发那一面
     for (const k of [1, 2]) S.box('iDoor', tx0 + (tx1 - tx0) * k / 3 - 0.006, 0.12, Math.min(front, front + fdir * 0.006), tx0 + (tx1 - tx0) * k / 3 + 0.006, 0.46, Math.max(front, front + fdir * 0.006), dark);
     // 电视：圆角机身 + 屏幕放着"四零三新闻"（UV 让字从沙发那边看是正的）
@@ -786,17 +823,17 @@
     }
     if (tw >= 0.35) {
       const zc = zw + sd * (tPos + tw / 2);
-      S.box('iDoor', xm - 0.55, 0.38, zc - tw / 2, xm + 0.55, 0.42, zc + tw / 2, wood);
-      S.box('iDoor', xm - 0.5, 0.12, zc - tw / 2 + 0.04, xm + 0.5, 0.14, zc + tw / 2 - 0.04, wood);
-      for (const [lx, lz] of [[-0.5, -tw / 2 + 0.04], [0.46, -tw / 2 + 0.04], [-0.5, tw / 2 - 0.08], [0.46, tw / 2 - 0.08]]) S.box('iDoor', xm + lx, 0, zc + lz, xm + lx + 0.04, 0.38, zc + lz + 0.04, wood);
+      S.cbox('iDoor', xm - 0.55, 0.38, zc - tw / 2, xm + 0.55, 0.42, zc + tw / 2, wood, 0.01);
+      S.cbox('iDoor', xm - 0.5, 0.12, zc - tw / 2 + 0.04, xm + 0.5, 0.14, zc + tw / 2 - 0.04, wood, 0.006);
+      for (const [lx, lz] of [[-0.5, -tw / 2 + 0.04], [0.46, -tw / 2 + 0.04], [-0.5, tw / 2 - 0.08], [0.46, tw / 2 - 0.08]]) legBox(S, 'iDoor', xm + lx, 0, zc + lz, xm + lx + 0.04, 0.38, zc + lz + 0.04, wood);
       cup(xm + 0.25, 0.42, zc);                                                               // 茶几上一个带红盖的水杯
-      S.box('iGoods', xm - 0.3, 0.42, zc - 0.12, xm - 0.05, 0.45, zc + 0.08, col(rng.pick(['#e85d4a', '#3b6fb6', '#f2a33a'])));
+      S.cbox('iGoods', xm - 0.3, 0.42, zc - 0.12, xm - 0.05, 0.45, zc + 0.08, col(rng.pick(['#e85d4a', '#3b6fb6', '#f2a33a'])), 0.005);
       out.push({ x0: xm - 0.55, x1: xm + 0.55, z0: zc - tw / 2, z1: zc + tw / 2, y0: 0, y1: 0.45, top: 0.42 });
     } else {
       // 客厅太窄放不下茶几：沙发靠里那头的墙角放一张小边几
       const [k0, k1] = zr(zw, sd, 0.06, 0.5), kx0 = xs1 + 0.06, kx1 = kx0 + 0.44;
       if (kx1 < xi1 - 1.0) {
-        S.box('iDoor', kx0, 0.5, k0, kx1, 0.54, k1, wood);
+        S.cbox('iDoor', kx0, 0.5, k0, kx1, 0.54, k1, wood, 0.01);
         S.geo('iDoor', CYL(), m4((kx0 + kx1) / 2, 0.25, (k0 + k1) / 2, 0, 0.03, 0.5, 0.03), wood);
         S.geo('iDoor', CYL(), m4((kx0 + kx1) / 2, 0.01, (k0 + k1) / 2, 0, 0.16, 0.02, 0.16), wood);
         cup((kx0 + kx1) / 2 + 0.08, 0.54, (k0 + k1) / 2);
@@ -862,6 +899,8 @@
     return {
       P, R,
       box(S, k, a0, a1, y0, y1, b0, b1, c) { const r = R(a0, a1, b0, b1); S.box(k, r.x0, y0, r.z0, r.x1, y1, r.z1, c); return r; },
+      leg(S, k, a0, a1, y0, y1, b0, b1, c) { const r = R(a0, a1, b0, b1); legBox(S, k, r.x0, y0, r.z0, r.x1, y1, r.z1, c); return r; },
+      cbox(S, k, a0, a1, y0, y1, b0, b1, c, rr) { const r = R(a0, a1, b0, b1); S.cbox(k, r.x0, y0, r.z0, r.x1, y1, r.z1, c, rr); return r; },
       // 椭球（马桶、台盆）：sa 沿 a、sb 沿 b
       blob(S, k, a, y, b, sa, sy, sb, c) { const p = P(a, y, b); S.geo(k, SPH(), aAxis === 'x' ? m4(p[0], y, p[2], 0, sa, sy, sb) : m4(p[0], y, p[2], 0, sb, sy, sa), c); },
       // 竖直的圆柱
@@ -873,18 +912,18 @@
   function bedSet(S, out, rng, F, aMin, bw, standFirst, len = 2.05) {
     const sa0 = standFirst ? aMin + 0.04 : aMin + 0.08 + bw, ba0 = standFirst ? aMin + 0.54 : aMin + 0.04, ba1 = ba0 + bw;
     const wood = col(rng.pick(WOODS)), head = col(rng.pick(SOFA)), duv = col(rng.pick(DUVET)), white = col('#f6f4ef');
-    F.box(S, 'iFabric', ba0 - 0.03, ba1 + 0.03, 0, 0.7, 0, 0.08, head);               // 床头板（矮一点，别挡住侧墙上的窗）
-    F.box(S, 'iDoor', ba0, ba1, 0.1, 0.3, 0.08, len, wood);                            // 床架
-    for (const [a, b] of [[ba0, 0.08], [ba1 - 0.05, 0.08], [ba0, len - 0.05], [ba1 - 0.05, len - 0.05]]) F.box(S, 'iDoor', a, a + 0.05, 0, 0.1, b, b + 0.05, wood);
-    F.box(S, 'iFabric', ba0 + 0.03, ba1 - 0.03, 0.3, 0.52, 0.1, len - 0.02, white);   // 床垫
-    F.box(S, 'iFabric', ba0 - 0.01, ba1 + 0.01, 0.4, 0.56, 0.78, len + 0.01, duv);    // 被子
-    F.box(S, 'iFabric', ba0 - 0.01, ba1 + 0.01, 0.56, 0.6, 0.78, 1.02, duv.clone().offsetHSL(0, 0, 0.08)); // 被子翻折
+    F.cbox(S, 'iFabric', ba0 - 0.03, ba1 + 0.03, 0, 0.7, 0, 0.08, head, 0.025);       // 床头板（矮一点，别挡住侧墙上的窗）
+    F.cbox(S, 'iDoor', ba0, ba1, 0.1, 0.3, 0.08, len, wood, 0.015);                    // 床架
+    for (const [a, b] of [[ba0, 0.08], [ba1 - 0.05, 0.08], [ba0, len - 0.05], [ba1 - 0.05, len - 0.05]]) F.leg(S, 'iDoor', a, a + 0.05, 0, 0.1, b, b + 0.05, wood);
+    F.cbox(S, 'iFabric', ba0 + 0.03, ba1 - 0.03, 0.3, 0.52, 0.1, len - 0.02, white, 0.03);   // 床垫
+    F.cbox(S, 'iFabric', ba0 - 0.01, ba1 + 0.01, 0.4, 0.56, 0.78, len + 0.01, duv, 0.025);  // 被子
+    F.cbox(S, 'iFabric', ba0 - 0.01, ba1 + 0.01, 0.56, 0.6, 0.78, 1.02, duv.clone().offsetHSL(0, 0, 0.08), 0.015); // 被子翻折
     const np = bw >= 1.2 ? 2 : 1, pw = (bw - 0.12) / np;
-    for (let i = 0; i < np; i++) F.box(S, 'iFabric', ba0 + 0.06 + i * pw + 0.02, ba0 + 0.06 + (i + 1) * pw - 0.02, 0.52, 0.64, 0.14, 0.5, white);
+    for (let i = 0; i < np; i++) F.cbox(S, 'iFabric', ba0 + 0.06 + i * pw + 0.02, ba0 + 0.06 + (i + 1) * pw - 0.02, 0.52, 0.64, 0.14, 0.5, white, 0.03);
     // 床面能跳上去站（被子顶 0.56），床头板那一条照样挡人
     out.push(Object.assign(F.R(ba0 - 0.03, ba1 + 0.03, 0, len + 0.01), { y0: 0, y1: 0.7, parts: [F.R(ba0 - 0.03, ba1 + 0.03, 0, 0.08), Object.assign(F.R(ba0 - 0.03, ba1 + 0.03, 0.092, len + 0.01), { top: 0.56 })] }));
     // 床头柜 + 台灯
-    F.box(S, 'iDoor', sa0, sa0 + 0.44, 0.04, 0.52, 0.03, 0.43, wood);
+    F.cbox(S, 'iDoor', sa0, sa0 + 0.44, 0.04, 0.52, 0.03, 0.43, wood, 0.012);
     F.box(S, 'iDoor', sa0 + 0.04, sa0 + 0.4, 0.29, 0.305, 0.43, 0.436, col('#2a2d31'));
     F.cyl(S, 'iDeco', sa0 + 0.22, 0.62, 0.2, 0.05, 0.2, col('#d8b25a'));
     F.cyl(S, 'iLamp', sa0 + 0.22, 0.8, 0.2, 0.11, 0.17, col('#fff1d6'));
@@ -900,9 +939,9 @@
     const white = col('#f7f7f4'), chrome = col('#d7dadd'), tile = col('#e9eef0');
     // 淋浴间（湿区）
     const sd = 0.95;
-    F.box(S, 'iTile', a0, Dx, 0, 0.04, 0, sd, tile);                                      // 底盘
+    F.cbox(S, 'iTile', a0, Dx, 0, 0.04, 0, sd, tile, 0.01);                               // 底盘
     F.box(S, 'iMetal', mid - 0.06, mid + 0.06, 0.04, 0.044, sd * 0.45, sd * 0.45 + 0.12, col('#8c949c')); // 地漏
-    F.box(S, 'iStone', a0, Dx, 0, 0.06, sd - 0.02, sd + 0.03, col('#e6e1d8'));            // 挡水条
+    F.cbox(S, 'iStone', a0, Dx, 0, 0.06, sd - 0.02, sd + 0.03, col('#e6e1d8'), 0.01);     // 挡水条
     for (const [p0, p1] of [[a0, mid - 0.38], [mid + 0.38, Dx]]) {
       F.box(S, 'iGlass', p0, p1, 0.06, 1.95, sd - 0.006, sd + 0.006, WHITE);
       F.box(S, 'iMetal', p0, p1, 1.95, 1.98, sd - 0.015, sd + 0.015, chrome);
@@ -915,20 +954,20 @@
     tube(S, 'iMetal', F.P(Dx - 0.04, 2.02, hb), F.P(Dx - 0.32, 2.02, hb), 0.012, chrome);
     F.cyl(S, 'iMetal', Dx - 0.32, 1.99, hb, 0.11, 0.025, chrome);
     F.box(S, 'iMetal', Dx - 0.07, Dx - 0.02, 1.0, 1.1, hb - 0.09, hb + 0.09, chrome);
-    F.box(S, 'iGoods', a0, a0 + 0.14, 1.1, 1.12, 0.22, 0.56, white);                    // 置物架（卧室那面隔墙上）+ 两瓶洗发水
+    F.cbox(S, 'iGoods', a0, a0 + 0.14, 1.1, 1.12, 0.22, 0.56, white, 0.005);            // 置物架（卧室那面隔墙上）+ 两瓶洗发水
     F.cyl(S, 'iGoods', a0 + 0.07, 1.19, 0.32, 0.035, 0.16, col(rng.pick(['#3b6fb6', '#e85d4a', '#3a9d5d'])));
     F.cyl(S, 'iGoods', a0 + 0.07, 1.17, 0.46, 0.03, 0.12, col(rng.pick(['#f2a33a', '#8a5cc2', '#ffffff'])));
     // 干区：马桶靠卧室那面墙，洗手台靠走廊那面墙，面对面
     const tu = H.clamp(sd + 0.45, sd + 0.35, Wz - 0.32);
-    F.box(S, 'iGoods', a0, a0 + 0.18, 0.42, 0.8, tu - 0.2, tu + 0.2, white);            // 水箱
+    F.cbox(S, 'iGoods', a0, a0 + 0.18, 0.42, 0.8, tu - 0.2, tu + 0.2, white, 0.02);     // 水箱
     F.box(S, 'iMetal', a0 + 0.05, a0 + 0.13, 0.8, 0.81, tu - 0.04, tu + 0.04, chrome);  // 冲水按钮
-    F.box(S, 'iGoods', a0 + 0.18, a0 + 0.46, 0, 0.36, tu - 0.13, tu + 0.13, white);     // 底座
+    F.cbox(S, 'iGoods', a0 + 0.18, a0 + 0.46, 0, 0.36, tu - 0.13, tu + 0.13, white, 0.025); // 底座
     F.blob(S, 'iGoods', a0 + 0.42, 0.36, tu, 0.25, 0.07, 0.19, white);                  // 坐便圈
     F.blob(S, 'iGoods', a0 + 0.4, 0.44, tu, 0.23, 0.025, 0.18, col('#ffffff'));         // 盖子
     out.push(Object.assign(F.R(a0, a0 + 0.68, tu - 0.21, tu + 0.21), { y0: 0, y1: 0.85 }));
     const vu = tu;
-    F.box(S, 'iDoor', Dx - 0.43, Dx, 0.1, 0.8, vu - 0.32, vu + 0.32, col(rng.pick(['#f2efe8', '#b98a5a', '#6b4a32'])));
-    F.box(S, 'iStone', Dx - 0.45, Dx, 0.8, 0.84, vu - 0.34, vu + 0.34, col('#efece6'));
+    F.cbox(S, 'iDoor', Dx - 0.43, Dx, 0.1, 0.8, vu - 0.32, vu + 0.32, col(rng.pick(['#f2efe8', '#b98a5a', '#6b4a32'])), 0.012);
+    F.cbox(S, 'iStone', Dx - 0.45, Dx, 0.8, 0.84, vu - 0.34, vu + 0.34, col('#efece6'), 0.008);
     F.blob(S, 'iGoods', Dx - 0.24, 0.86, vu, 0.16, 0.06, 0.2, white);                   // 台上盆
     tube(S, 'iMetal', F.P(Dx - 0.05, 0.84, vu), F.P(Dx - 0.05, 1.0, vu), 0.012, chrome);
     tube(S, 'iMetal', F.P(Dx - 0.05, 1.0, vu), F.P(Dx - 0.15, 0.98, vu), 0.01, chrome);
@@ -1670,7 +1709,7 @@
   // 货架：沿 axis 方向的一排（axis 'x' 表示货架沿 x 走），levels 层，带一排排商品
   function shelf(S, boxes, x0, x1, z0, z1, h, levels, rng, opts = {}) {
     const C = col(opts.c || '#e9e6df'), alongX = (x1 - x0) >= (z1 - z0);
-    S.box('iMetal', x0, 0, z0, x1, 0.12, z1, col(opts.base || '#9aa1a8'));
+    S.cbox('iMetal', x0, 0, z0, x1, 0.12, z1, col(opts.base || '#9aa1a8'), 0.01);
     if (opts.back !== false) {
       if (alongX) S.box('iMetal', x0, 0.12, (z0 + z1) / 2 - 0.02, x1, h, (z0 + z1) / 2 + 0.02, C);
       else S.box('iMetal', (x0 + x1) / 2 - 0.02, 0.12, z0, (x0 + x1) / 2 + 0.02, h, z1, C);
@@ -1698,8 +1737,8 @@
     boxes.push({ x0, x1, z0, z1, y0: 0, y1: h });
   }
   function counter(S, boxes, x0, x1, z0, z1, c, top) {
-    S.box('iDoor', x0, 0, z0, x1, 0.98, z1, col(c));
-    S.box('iStone', x0 - 0.03, 0.98, z0 - 0.03, x1 + 0.03, 1.04, z1 + 0.03, col(top || '#e9e4da'));
+    S.cbox('iDoor', x0, 0, z0, x1, 0.98, z1, col(c), 0.015);
+    S.cbox('iStone', x0 - 0.03, 0.98, z0 - 0.03, x1 + 0.03, 1.04, z1 + 0.03, col(top || '#e9e4da'), 0.012);
     boxes.push({ x0, x1, z0, z1, y0: 0, y1: 1.1 });
   }
   function tableSet(S, boxes, x, z, rng, c) {
@@ -1709,10 +1748,10 @@
     const cc = col(rng.pick(['#c98b5a', '#5f8f86', '#d9a441', '#8a6bb3']));
     for (const [dx, dz] of [[0.62, 0], [-0.62, 0], [0, 0.62], [0, -0.62]]) {
       if (rng() < 0.25) continue;
-      S.box('iDoor', x + dx - 0.2, 0.44, z + dz - 0.2, x + dx + 0.2, 0.49, z + dz + 0.2, cc);
-      for (const [lx, lz] of [[-0.17, -0.17], [0.17, -0.17], [-0.17, 0.17], [0.17, 0.17]]) S.box('iMetal', x + dx + lx - 0.015, 0, z + dz + lz - 0.015, x + dx + lx + 0.015, 0.44, z + dz + lz + 0.015, col('#3d4248'));
-      if (Math.abs(dx) > 0) S.box('iDoor', x + dx + Math.sign(dx) * 0.18 - 0.02, 0.49, z + dz - 0.2, x + dx + Math.sign(dx) * 0.18 + 0.02, 0.92, z + dz + 0.2, cc);
-      else S.box('iDoor', x + dx - 0.2, 0.49, z + dz + Math.sign(dz) * 0.18 - 0.02, x + dx + 0.2, 0.92, z + dz + Math.sign(dz) * 0.18 + 0.02, cc);
+      S.cbox('iDoor', x + dx - 0.2, 0.44, z + dz - 0.2, x + dx + 0.2, 0.49, z + dz + 0.2, cc, 0.012);
+      for (const [lx, lz] of [[-0.17, -0.17], [0.17, -0.17], [-0.17, 0.17], [0.17, 0.17]]) legBox(S, 'iMetal', x + dx + lx - 0.015, 0, z + dz + lz - 0.015, x + dx + lx + 0.015, 0.44, z + dz + lz + 0.015, col('#3d4248'));
+      if (Math.abs(dx) > 0) S.cbox('iDoor', x + dx + Math.sign(dx) * 0.18 - 0.02, 0.49, z + dz - 0.2, x + dx + Math.sign(dx) * 0.18 + 0.02, 0.92, z + dz + 0.2, cc, 0.01);
+      else S.cbox('iDoor', x + dx - 0.2, 0.49, z + dz + Math.sign(dz) * 0.18 - 0.02, x + dx + 0.2, 0.92, z + dz + Math.sign(dz) * 0.18 + 0.02, cc, 0.01);
     }
     boxes.push({ x0: x - 0.55, x1: x + 0.55, z0: z - 0.55, z1: z + 0.55, y0: 0, y1: 0.95 });
   }
@@ -1728,7 +1767,7 @@
       // 冷柜：后墙一排，玻璃门里亮着
       const fz0 = zL + 1.9, fz1 = Math.min(zR - 1.4, fz0 + 2.6); // 别挡住后屋门洞（zR-1.25 起）
       if (fz1 - fz0 > 1) {
-        S.box('iMetal', xB - 0.7, 0, fz0, xB - 0.04, 2.0, fz1, col('#f2f4f5'));
+        S.cbox('iMetal', xB - 0.7, 0, fz0, xB - 0.04, 2.0, fz1, col('#f2f4f5'), 0.02);
         S.box('iLamp', xB - 0.71, 0.25, fz0 + 0.06, xB - 0.7, 1.8, fz1 - 0.06, col('#dff2ff'));
         for (let z = fz0 + 0.6; z < fz1 - 0.1; z += 0.6) S.box('iMetal', xB - 0.73, 0.2, z - 0.02, xB - 0.7, 1.85, z + 0.02, col('#c9ced3'));
         boxes.push({ x0: xB - 0.72, x1: xB, z0: fz0, z1: fz1, y0: 0, y1: 2 });
@@ -1741,8 +1780,8 @@
         for (let z = zL + 0.5; z < Math.min(zR - 1.1, zL + 3.4); z += 0.3) S.geo('iGoods', SPH(), m4(xB - 0.8, 1.1, z, rng() * 3, 0.13, 0.07, 0.09), hsl(0.07 + rng() * 0.04, 0.6, 0.45 + rng() * 0.15));
         shelf(S, boxes, xF + 0.8, xB - 2.0, zL + 0.02, zL + 0.45, 1.6, 4, rng, { c: '#c99a6a', base: '#8a5a3c', goods: (r) => hsl(0.07 + r() * 0.05, 0.6, 0.45 + r() * 0.15) });
       } else {
-        S.box('iMetal', xB - 0.95, 1.04, zL + 0.6, xB - 0.6, 1.5, zL + 1.0, col('#3d4248'));   // 咖啡机 / 收银机
-        S.box('iGoods', xB - 0.09, 1.7, zL + 0.4, xB - 0.065, 2.5, Math.min(zR - 1.3, zL + 3.2), col(acc));  // 菜单板（贴在后墙前店那面）
+        S.cbox('iMetal', xB - 0.95, 1.04, zL + 0.6, xB - 0.6, 1.5, zL + 1.0, col('#3d4248'), 0.015);   // 咖啡机 / 收银机
+        S.cbox('iGoods', xB - 0.09, 1.7, zL + 0.4, xB - 0.065, 2.5, Math.min(zR - 1.3, zL + 3.2), col(acc), 0.006);  // 菜单板（贴在后墙前店那面）
       }
       // 桌子间距 1.8：两套桌椅之间留 0.7m，人能从中间走过去；烘焙店靠墙有货架，第一排往里让
       const zT0 = zL + (cat === 'bakery' ? 1.35 : 1.0);
@@ -1756,7 +1795,7 @@
       const bk = (r) => hsl(r(), 0.45, 0.35 + r() * 0.3);
       shelf(S, boxes, xF + 0.6, xB - 0.6, zL + 0.02, zL + 0.42, 2.2, 6, rng, { c: '#8a5a3c', base: '#6b4a32', goods: bk, books: true, wall: 'lo', back: false });
       shelf(S, boxes, xF + 2.2, xB - 0.6, zR - 0.42, zR - 0.02, 2.2, 6, rng, { c: '#8a5a3c', base: '#6b4a32', goods: bk, books: true, wall: 'hi', back: false });
-      S.box('iDoor', xF + 2.0, 0, mid - 0.6, xF + 3.4, 0.8, mid + 0.6, col('#b98a5a'));
+      S.cbox('iDoor', xF + 2.0, 0, mid - 0.6, xF + 3.4, 0.8, mid + 0.6, col('#b98a5a'), 0.015);
       for (let k = 0; k < 8; k++) S.box('iGoods', xF + 2.1 + rng() * 1.1, 0.8, mid - 0.5 + rng() * 0.9, xF + 2.1 + rng() * 1.1 + 0.2, 0.84 + rng() * 0.06, mid - 0.5 + rng() * 0.9 + 0.15, bk(rng));
       boxes.push({ x0: xF + 2.0, x1: xF + 3.4, z0: mid - 0.6, z1: mid + 0.6, y0: 0, y1: 0.9 });
       counter(S, boxes, xB - 1.2, xB - 0.6, mid - 0.8, mid + 0.8, '#6b4a32');
@@ -1765,13 +1804,13 @@
       for (let i = 0; i < n; i++) {
         const x = xF + 1.4 + i * 1.5;
         S.quad('iSteel', [x - 0.45, 0.9, zL + 0.01], [x + 0.45, 0.9, zL + 0.01], [x + 0.45, 2.0, zL + 0.01], [x - 0.45, 2.0, zL + 0.01], [0, 0, 1], col('#eef2f5'));
-        S.box('iDoor', x - 0.5, 0.75, zL + 0.02, x + 0.5, 0.8, zL + 0.35, col('#f4f1ea'));
+        S.cbox('iDoor', x - 0.5, 0.75, zL + 0.02, x + 0.5, 0.8, zL + 0.35, col('#f4f1ea'), 0.008);
         S.geo('iMetal', CYL(), m4(x, 0.25, zL + 0.95, 0, 0.25, 0.5, 0.25), col('#3d4248'));
-        S.box('iFabric', x - 0.3, 0.5, zL + 0.7, x + 0.3, 0.62, zL + 1.25, col(acc));
-        S.box('iFabric', x - 0.3, 0.62, zL + 1.15, x + 0.3, 1.25, zL + 1.27, col(acc));
+        S.cbox('iFabric', x - 0.3, 0.5, zL + 0.7, x + 0.3, 0.62, zL + 1.25, col(acc), 0.025);
+        S.cbox('iFabric', x - 0.3, 0.62, zL + 1.15, x + 0.3, 1.25, zL + 1.27, col(acc), 0.025);
         boxes.push({ x0: x - 0.32, x1: x + 0.32, z0: zL + 0.65, z1: zL + 1.3, y0: 0, y1: 1.2 });
       }
-      S.box('iFabric', xF + 0.4, 0, zSafe - 0.5, xF + 2.2, 0.45, zSafe - 0.05, col('#4a5a6a'));
+      S.cbox('iFabric', xF + 0.4, 0, zSafe - 0.5, xF + 2.2, 0.45, zSafe - 0.05, col('#4a5a6a'), 0.025);
       boxes.push({ x0: xF + 0.4, x1: xF + 2.2, z0: zSafe - 0.5, z1: zSafe - 0.05, y0: 0, y1: 0.45, top: 0.45 }); // 等候长凳：能跳上去站
       counter(S, boxes, xB - 1.0, xB - 0.4, mid - 0.6, mid + 0.6, '#f4f1ea');
     } else if (cat === 'flower' || cat === 'fruit') {
@@ -1782,7 +1821,7 @@
         let xe = xs0;
         for (let x = xs0; x < xB - 1.0; x += 0.7) {
           xe = x + 0.62;
-          S.box('iDoor', x, 0, zz0, x + 0.62, 0.55, zz1, col('#a8754a'));
+          S.cbox('iDoor', x, 0, zz0, x + 0.62, 0.55, zz1, col('#a8754a'), 0.015);
           for (let k = 0; k < 9; k++) S.geo('iGoods', SPH(), m4(x + 0.1 + rng() * 0.42, 0.62 + rng() * 0.1, zz0 + 0.1 + rng() * (zz1 - zz0 - 0.2), 0, 0.07, 0.07, 0.07), col(rng.pick(pal)));
           if (cat === 'flower') for (let k = 0; k < 4; k++) S.geo('iLeaf', SPH(), m4(x + 0.12 + rng() * 0.38, 0.75 + rng() * 0.25, zz0 + 0.15 + rng() * (zz1 - zz0 - 0.3), 0, 0.09, 0.12, 0.09), col('#4f8a3f'));
         }
@@ -1792,18 +1831,18 @@
     } else if (cat === 'garage') {
       for (let k = 0; k < 4; k++) for (let j = 0; j < 3; j++) S.geo('iFabric', TOR(), m4(xB - 0.6 - k * 0.75, 0.12 + j * 0.24, zL + 0.45, 0, 0.3, 0.3, 0.3, PI / 2), col('#2a2d31'));
       boxes.push({ x0: xB - 3.25, x1: xB - 0.2, z0: zL + 0.05, z1: zL + 0.85, y0: 0, y1: 0.8 });
-      S.box('iDoor', xF + 0.8, 0, zL + 0.02, xF + 2.8, 0.9, zL + 0.75, col('#8a6a4a'));
+      S.cbox('iDoor', xF + 0.8, 0, zL + 0.02, xF + 2.8, 0.9, zL + 0.75, col('#8a6a4a'), 0.015);
       S.box('iMetal', xF + 0.8, 1.1, zL + 0.01, xF + 2.8, 2.2, zL + 0.03, col('#d0d4d8'));
       for (let k = 0; k < 10; k++) S.box('iGoods', xF + 0.9 + k * 0.19, 1.3 + rng() * 0.6, zL + 0.03, xF + 0.96 + k * 0.19, 1.5 + rng() * 0.6, zL + 0.06, hsl(rng(), 0.4, 0.4));
       boxes.push({ x0: xF + 0.8, x1: xF + 2.8, z0: zL, z1: zL + 0.78, y0: 0, y1: 1 });
       counter(S, boxes, xB - 1.0, xB - 0.4, mid, mid + 1.4, '#556270');
     } else if (cat === 'studio') {
       S.quad('iFabric', [xB - 0.1, 0, zL + 0.5], [xB - 0.1, 0, zR - 1.2], [xB - 0.1, 2.9, zR - 1.2], [xB - 0.1, 2.9, zL + 0.5], [-1, 0, 0], col('#dfe6ee'));
-      S.box('iDoor', xB - 1.6, 0, mid - 0.25, xB - 1.1, 0.45, mid + 0.25, col('#c98b5a'));   // 拍照凳
+      S.cbox('iDoor', xB - 1.6, 0, mid - 0.25, xB - 1.1, 0.45, mid + 0.25, col('#c98b5a'), 0.02);   // 拍照凳
       boxes.push({ x0: xB - 1.6, x1: xB - 1.1, z0: mid - 0.25, z1: mid + 0.25, y0: 0, y1: 0.45, top: 0.45 }); // 能跳上去站
       for (const zz of [mid - 1.2, mid + 1.0]) {
         tube(S, 'iMetal', [xF + 2.0, 0, zz], [xF + 2.0, 1.8, zz], 0.02, col('#2b2f33'));
-        S.box('iFabric', xF + 1.75, 1.7, zz - 0.3, xF + 2.25, 2.2, zz + 0.3, col('#f8f8f8'));
+        S.cbox('iFabric', xF + 1.75, 1.7, zz - 0.3, xF + 2.25, 2.2, zz + 0.3, col('#f8f8f8'), 0.02);
         boxes.push({ x0: xF + 1.8, x1: xF + 2.2, z0: zz - 0.2, z1: zz + 0.2, y0: 0, y1: 2 });
       }
       counter(S, boxes, xF + 0.6, xF + 1.2, zL + 0.4, zL + 1.6, '#556270');
